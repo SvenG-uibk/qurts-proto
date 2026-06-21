@@ -3,6 +3,7 @@
 *.o
 *.dyn_hi
 *.dyn_o
+*.claude
 dist/
 dist-newstyle/
 .stack-work/
