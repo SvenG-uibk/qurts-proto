@@ -455,6 +455,8 @@ checkExpr (ECall fname lts args) = do
       unless (length lts == length genericLfts) $
         throwError (OtherError ("Wrong number of lifetime arguments: expected "
           ++ show (length genericLfts) ++ ", got " ++ show (length lts)))
+      -- expr_function: ∀i, α_i ∈ A (each provided lifetime must be active)
+      forM_ lts requireActive
       let subst    = zip genericLfts lts
       let paramTys = map (substType subst . snd) (sigParams sig)
       let retTy    = substType subst (sigReturn sig)
