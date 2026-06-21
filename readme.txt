@@ -1,0 +1,21 @@
+lexer and parser is explained in the BNFC folder, but hopefully these dont need to be changed anymore for now.
+
+compile the Main.hs file (in the BNFC folder, not sure why I have it in that folder instead of root)
+which does the following: takes qurts-core code and runs the parser on it and also converts it to the syntax
+that I defined in Ast.hs
+
+ghc -ibnfc -ibnfc/bnfc-output bnfc/Main.hs AbsQurtsToAst.hs Ast.hs TypeChecker.hs -o qurts
+
+bnfc generation always adds Ident-wrappers and split types for parsing reasons and generates its own constructor names
+I really want to work with my own Ast.hs syntax though (which follows the paper very closely)
+So i had to write another conversion step (AbsQurtsToAst.hs)
+
+compile that with this
+ghc -ibnfc -ibnfc/bnfc-output bnfc/Main.hs AbsQurtsToAst.hs Ast.hs -o Qurts
+
+When everything is compiled, we can run either just the parser or parse+type-check with flags
+
+.\qurts parse examples\example_final.qurts-core
+.\qurts check examples\example_final.qurts-core
+
+

@@ -1,0 +1,13 @@
+fn example_error < alpha , beta | > (p : # bot qbit) -> # bot qbit {
+    let q = [0]() ;
+    newlft alpha ;
+    let r = &alpha p ;
+    let q = qif r { let q = [not](q) ; q } else { noop ; q } ;
+    drop q ;
+    endlft alpha ;
+    newlft beta ;
+    let s = &beta q ;
+    let p = qif s { let p = [not](p) ; p } else { noop ; p } ;
+    endlft beta ;
+    p
+}

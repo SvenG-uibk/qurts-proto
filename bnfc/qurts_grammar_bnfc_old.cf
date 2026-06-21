@@ -1,0 +1,166 @@
+-- Grammar for Qurts following Ast.hs structure
+-- Generated to match the AST types exactly
+
+entrypoints Program ;
+
+separator Function ";" ;
+separator Param "," ;
+separator LifetimeVar "," ;
+separator LifetimeRel ";" ;
+separator LifetimeAtom "," ;
+separator Var "," ;
+separator SimpleStmt ";" ;
+
+-----------------------------------------
+-- PROGRAM
+-----------------------------------------
+
+Program. Program ::= [Function] ;
+
+-----------------------------------------
+-- FUNCTION
+-----------------------------------------
+
+Function. Function ::= "fn" Ident Signature Block ;
+
+-----------------------------------------
+-- SIGNATURE
+-----------------------------------------
+
+Signature. Signature ::= LifetimePreorder "(" [Param] ")" "->" Type ;
+
+Param. Param ::= Var ":" Type ;
+
+-----------------------------------------
+-- LIFETIME PREORDER
+-----------------------------------------
+
+-- Represents: A = ⟨{α, β, ...}, {(α, β), ...}⟩
+LifetimePreorder. LifetimePreorder ::= 
+  Ident "[" [LifetimeVar] "]" "{" [LifetimeRel] "}" ;
+
+LifetimeVar. LifetimeVar ::= Ident ;
+
+-- Relations: α <= β
+LifetimeRel. LifetimeRel ::= LifetimeAtom "<=" LifetimeAtom ;
+
+-----------------------------------------
+-- LIFETIME ATOMS
+-----------------------------------------
+
+LVar. LifetimeAtom ::= Ident ;
+LBottom. LifetimeAtom ::= "bot" ;
+LTop. LifetimeAtom ::= "top" ;
+
+-----------------------------------------
+-- BLOCK
+-----------------------------------------
+
+-- { S ; x }
+Block. Block ::= "{" Stmt ";" Var "}" ;
+
+-----------------------------------------
+-- STATEMENTS
+-----------------------------------------
+
+-- noop is a complete statement
+SNoop. SimpleStmt ::= "noop" ;
+
+-- newlft α
+SNewLft. SimpleStmt ::= "newlft" Ident ;
+
+-- endlft α
+SEndLft. SimpleStmt ::= "endlft" Ident ;
+
+-- α ≤ β
+SLeq. SimpleStmt ::= Ident "<=" Ident ;
+
+-- x as T
+SAs. SimpleStmt ::= Var "as" Type ;
+
+-- let y = &α x
+SLetRef. SimpleStmt ::= "let" Var "=" "&" Ident Var ;
+
+-- let y = e
+SLetExpr. SimpleStmt ::= "let" Var "=" Expr ;
+
+-- let (y0, y1) = x
+SLetPair. SimpleStmt ::= "let" "(" Var "," Var ")" "=" Var ;
+
+-- drop x
+SDrop. SimpleStmt ::= "drop" Var ;
+
+-- A single simple statement is a statement
+SimpleStmt. Stmt ::= SimpleStmt ;
+
+-- Sequential composition: simple ; stmt (right-associative)
+SSeq. Stmt ::= SimpleStmt ";" Stmt ;
+
+-----------------------------------------
+-- EXPRESSIONS
+-----------------------------------------
+
+-- x
+EVar. Expr ::= Var ;
+
+-- true
+ETrue. Expr ::= "true" ;
+
+-- false
+EFalse. Expr ::= "false" ;
+
+-- ()
+EUnit. Expr ::= "()" ;
+
+-- (x, y)
+EPair. Expr ::= "(" Var "," Var ")" ;
+
+-- copy x
+ECopy. Expr ::= "copy" Var ;
+
+-- meas(x)
+EMeas. Expr ::= "meas" "(" Var ")" ;
+
+-- U(x)  where U is a unitary name
+EU. Expr ::= Ident "(" Var ")" ;
+
+-- [c](x)  where c is a channel name (string)
+EC. Expr ::= "[" String "]" "(" Var ")" ;
+
+-- f⟨α₀, ... , αₘ₋₁⟩(x₀, ... , xₙ₋₁)
+ECall. Expr ::= Ident "<" [LifetimeAtom] ">" "(" [Var] ")" ;
+
+-- if x Bt else Bf
+EIf. Expr ::= "if" Var Block "else" Block ;
+
+-- qif x B|1⟩ else B|0⟩
+EQIf. Expr ::= "qif" Var Block "<1>" "else" Block "<0>" ;
+
+-----------------------------------------
+-- TYPES
+-----------------------------------------
+
+-- bool
+TyBool. Type ::= "bool" ;
+
+-- qbit
+TyQBit. Type ::= "qbit" ;
+
+-- ()
+TyUnit. Type ::= "()" ;
+
+-- T1 × T2  (using * for multiplication)
+TyPair. Type ::= Type "*" Type ;
+
+-- &α T
+TyRef. Type ::= "&" LifetimeAtom Type ;
+
+-- #α T
+TyBang. Type ::= "#" LifetimeAtom Type ;
+
+-----------------------------------------
+-- VARIABLES
+-----------------------------------------
+
+-- Var is just an Ident (will be wrapped as Var Text in post-processing)
+Var. Var ::= Ident ;

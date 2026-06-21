@@ -1,0 +1,127 @@
+entrypoints Program ;
+
+separator  Function         ";" ;
+separator  Param            "," ;
+separator  Lifetime         "," ;
+separator  Ident            "," ;
+separator  LifetimeConstraint "," ;
+
+-----------------------------------------
+-- PROGRAM
+-- Π ::= F0 ... Fn-1
+-----------------------------------------
+
+Program. Program ::= [Function] ;
+
+-----------------------------------------
+-- FUNCTION
+-- F ::= fn f Σ B
+-----------------------------------------
+
+Function. Function ::= "fn" Ident Signature Block ;
+
+-----------------------------------------
+-- SIGNATURE
+-- Σ ::= A (x0:T0, ..., xn-1:Tn-1) → T
+-----------------------------------------
+
+Signature. Signature ::=
+  LifetimeContext "(" [Param] ")" "->" Type ;
+
+Param. Param ::= Ident ":" Type ;
+
+-----------------------------------------
+-- LIFETIME CONTEXT (preorder)
+-- A = ⟨A, R⟩  where A = set of lifetime vars,
+--              R = preorder constraints
+-- written: < α, β | α <= β >
+-- empty:   < | >
+-----------------------------------------
+
+LifetimeContext. LifetimeContext ::=
+  "<" [Lifetime] "|" [LifetimeConstraint] ">" ;
+
+LifetimeConstraint. LifetimeConstraint ::= Lifetime "<=" Lifetime ;
+
+-----------------------------------------
+-- BLOCK
+-- B ::= { S; x }   (x is just an Ident)
+-----------------------------------------
+
+Block. Block ::= "{" Stmt ";" Ident "}" ;
+
+-----------------------------------------
+-- STATEMENTS
+-- S ::= noop | S1;S2 | newlft α | endlft α
+--     | α ≤ β | x as T
+--     | let y = &α x | let y = e
+--     | let (y0,y1) = x | drop x
+-----------------------------------------
+
+Stmt.    Stmt ::= SimpleStmt ;
+StmtSeq. Stmt ::= Stmt ";" SimpleStmt ;
+
+SimpleStmtNoop.    SimpleStmt ::= "noop" ;
+SimpleStmtNewLft.  SimpleStmt ::= "newlft" Lifetime ;
+SimpleStmtEndLft.  SimpleStmt ::= "endlft" Lifetime ;
+SimpleStmtLeq.     SimpleStmt ::= Lifetime "<=" Lifetime ;
+SimpleStmtAs.      SimpleStmt ::= Ident "as" Type ;
+
+SimpleStmtLetRef.  SimpleStmt ::= "let" Ident "=" "&" Lifetime Ident ;
+SimpleStmtLetExpr. SimpleStmt ::= "let" Ident "=" Expr ;
+SimpleStmtLetPair. SimpleStmt ::= "let" "(" Ident "," Ident ")" "=" Ident ;
+SimpleStmtDrop.    SimpleStmt ::= "drop" Ident ;
+
+-----------------------------------------
+-- EXPRESSIONS
+-- e ::= x | false | true | () | (x0,x1) | copy x
+--     | meas(x) | U(x) | [c](x)
+--     | f⟨α0,...⟩(x0,...) | if x Bt else Bf
+--     | qif x B|1⟩ else B|0⟩
+-----------------------------------------
+
+EVar.   Expr ::= Ident ;
+ETrue.  Expr ::= "true" ;
+EFalse. Expr ::= "false" ;
+EUnit.  Expr ::= "(" ")" ;
+
+EPair.  Expr ::= "(" Ident "," Ident ")" ;
+
+ECopy.  Expr ::= "copy" Ident ;
+EMeas.  Expr ::= "meas" "(" Ident ")" ;
+
+EU.     Expr ::= Ident "(" Ident ")" ;
+EC.     Expr ::= "[" Ident "]" "(" Ident ")" ;
+
+-- qubit initialization: [0]() and [1]() are the only
+-- ways to introduce new qubits (in state |0⟩ or |1⟩)
+EInit0. Expr ::= "[" "0" "]" "(" ")" ;
+EInit1. Expr ::= "[" "1" "]" "(" ")" ;
+
+ECall.  Expr ::= Ident "<" [Lifetime] ">" "(" [Ident] ")" ;
+
+EIf.    Expr ::= "if" Ident Block "else" Block ;
+EQIf.   Expr ::= "qif" Ident Block "else" Block ;
+
+-----------------------------------------
+-- TYPES
+-- T ::= bool | qbit | () | T1*T2 | &α T | #α T
+-----------------------------------------
+
+TypeMul.        Type      ::= Type "*" PrefixType ;
+TypePrefix.     Type      ::= PrefixType ;
+TypePrefixRef.  PrefixType ::= "&" Lifetime PrefixType ;
+TypePrefixBang. PrefixType ::= "#" Lifetime PrefixType ;
+TypeAtomBool.   PrefixType ::= "bool" ;
+TypeAtomQbit.   PrefixType ::= "qbit" ;
+TypeAtomUnit.   PrefixType ::= "(" ")" ;
+
+-----------------------------------------
+-- LIFETIMES
+-- α ::= α | ⊥ | ⊤
+-- written: identifier | bot | top
+-----------------------------------------
+
+LVar.    Lifetime ::= Ident ;
+LBottom. Lifetime ::= "bot" ;
+LTop.    Lifetime ::= "top" ;

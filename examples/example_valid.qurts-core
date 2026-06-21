@@ -1,0 +1,11 @@
+fn example_valid < alpha | > (p : # bot qbit) -> # bot qbit {
+    let q = [0]() ;
+    newlft alpha ;
+    let r = &alpha p ;
+    let q = qif r { let q = [not](q) ; q } else { noop ; q } ;
+    drop q ;
+    drop r ;
+    endlft alpha ;
+    let p = H(p) ;
+    p
+}

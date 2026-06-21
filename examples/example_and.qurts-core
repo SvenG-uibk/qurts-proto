@@ -1,0 +1,17 @@
+
+fn and < alpha | > (x : & alpha qbit , y : & alpha qbit) -> # alpha qbit {
+    let result = qif x {
+        let result = qif y {
+            let r = [1]() ;
+            r
+        } else {
+            let r = [0]() ;
+            r
+        } ;
+        result
+    } else {
+        let r = [0]() ;
+        r
+    } ;
+    result
+}

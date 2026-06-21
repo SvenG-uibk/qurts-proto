@@ -1,0 +1,11 @@
+# Haskell compiled artifacts
+*.hi
+*.o
+*.dyn_hi
+*.dyn_o
+dist/
+dist-newstyle/
+.stack-work/
+
+# Binaries
+*.exe

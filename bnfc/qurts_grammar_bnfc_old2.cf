@@ -1,0 +1,102 @@
+entrypoints Program ;
+
+separator Function ";" ;
+separator Param "," ;
+separator Lifetime "," ;
+separator Arg "," ;
+
+-----------------------------------------
+-- PROGRAM
+-----------------------------------------
+
+Program. Program ::= [Function] ;
+
+-----------------------------------------
+-- FUNCTION
+-----------------------------------------
+
+Function. Function ::= "fn" Ident Signature Block ;
+
+-----------------------------------------
+-- SIGNATURE
+-----------------------------------------
+
+Signature. Signature ::=
+  LifetimeContext "(" [Param] ")" "->" Type ;
+
+Param. Param ::= Ident ":" Type ;
+
+-----------------------------------------
+-- BLOCK
+-----------------------------------------
+
+Block. Block ::= "{" Stmt ";" Expr "}" ;
+
+-----------------------------------------
+-- STATEMENTS
+-----------------------------------------
+
+Stmt. Stmt ::= SimpleStmt ;
+StmtSeq. Stmt ::= Stmt ";" SimpleStmt ;
+
+SimpleStmtNoop. SimpleStmt ::= "noop" ;
+SimpleStmtNewLft. SimpleStmt ::= "newlft" Lifetime ;
+SimpleStmtEndLft. SimpleStmt ::= "endlft" Lifetime ;
+SimpleStmtLeq.    SimpleStmt ::= Lifetime "<=" Lifetime ;
+SimpleStmtAs.     SimpleStmt ::= Ident "as" Type ;
+
+SimpleStmtLetRef. SimpleStmt ::= "let" Ident "=" "&" Lifetime Ident ;
+SimpleStmtLetExpr. SimpleStmt ::= "let" Ident "=" Expr ;
+SimpleStmtLetPair. SimpleStmt ::= "let" "(" Ident "," Ident ")" "=" Ident ;
+SimpleStmtDrop.    SimpleStmt ::= "drop" Ident ;
+
+-----------------------------------------
+-- EXPRESSIONS
+-----------------------------------------
+
+EVar.     Expr ::= Ident ;
+ETrue.    Expr ::= "true" ;
+EFalse.   Expr ::= "false" ;
+EUnit.    Expr ::= "(" ")" ;
+
+EPair.    Expr ::= "(" Expr "," Expr ")" ;
+
+ECopy.    Expr ::= "copy" Ident ;
+EMeas.    Expr ::= "meas" "(" Ident ")" ;
+
+EU.       Expr ::= Ident "(" Ident ")" ;
+EC.       Expr ::= "[" Ident "]" "(" Ident ")" ;
+
+ECall.    Expr ::= Ident "<" [Lifetime] ">" "(" [Arg] ")" ;
+
+EIf.      Expr ::= "if" Ident Block "else" Block ;
+
+EQIf.     Expr ::= "qif" Ident Block "<1>" "else" Block "<0>" ;
+
+-----------------------------------------
+-- TYPES
+-----------------------------------------
+
+Arg. Arg ::= Ident ;
+
+TypeMul. Type ::= Type "*" PrefixType ;
+TypePrefix. Type ::= PrefixType ;
+TypePrefixRef. PrefixType ::= "&" Lifetime PrefixType ;
+TypePrefixBang. PrefixType ::= "#" Lifetime PrefixType ;
+TypeAtom. PrefixType ::= "bool" ;
+TypeAtomQbit. PrefixType ::= "qbit" ;
+TypeAtomUnit. PrefixType ::= "(" ")" ;
+
+-----------------------------------------
+-- LIFETIMES
+-----------------------------------------
+
+Lifetime. Lifetime ::= Ident ;
+LBottom.  Lifetime ::= "bot" ;
+LTop.     Lifetime ::= "top" ;
+
+-----------------------------------------
+-- AUXILIARY
+-----------------------------------------
+
+LifetimeContext. LifetimeContext ::= "A" ;

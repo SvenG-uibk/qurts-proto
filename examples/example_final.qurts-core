@@ -1,0 +1,13 @@
+fn main <| > () -> #top bool {
+    let x0 = [0]() ;
+    x0 as #bot qbit ;
+    let x1 = H(x0) ;
+    newlft alpha ;
+    let r = &alpha x1 ;
+    let y = qif r { let z = [1]() ; z } else { let z = [0]() ; z } ;
+    drop r ;
+    drop y ;
+    endlft alpha ;
+    let ret = meas(x1) ;
+    ret
+}
