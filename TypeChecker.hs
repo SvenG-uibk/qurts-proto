@@ -554,18 +554,40 @@ stripBang t            = t
 -- ============================================================
 
 isSubtype :: Type -> Type -> TC Bool
--- subty_shorten: P𝔞 T ≤ P𝔟 T  when 𝔟 ≤ 𝔞
-isSubtype (TyRef a t1) (TyRef b t2)   = do
-  ok1 <- leq b a   -- shorter lifetime
-  ok2 <- isSubtype t1 t2
-  return (ok1 && ok2)
-isSubtype (TyBang a t1) (TyBang b t2) = do
-  ok1 <- leq b a
-  ok2 <- isSubtype t1 t2
-  return (ok1 && ok2)
+-- subty_shorten: &𝔞 T ≤ &𝔟 T  when 𝔟 ≤ 𝔞
+-- subty_reborrow: &𝔠 &𝔞 T ≤ &𝔟 T  when 𝔟 ≤ 𝔠 and 𝔟 ≤ 𝔞
+-- subty_borrow_affine: &𝔠 #𝔞 T ≤ &𝔟 T  when 𝔟 ≤ 𝔠 and 𝔟 ≤ 𝔞
+isSubtype (TyRef c t1) (TyRef b t2) = tryShorten `orM` tryCollapse
+  where
+    tryShorten  = do ok1 <- leq b c; ok2 <- isSubtype t1 t2; return (ok1 && ok2)
+    tryCollapse = case t1 of
+      TyRef  a inner -> do ok1 <- leq b c; ok2 <- leq b a; ok3 <- isSubtype inner t2; return (ok1 && ok2 && ok3)
+      TyBang a inner -> do ok1 <- leq b c; ok2 <- leq b a; ok3 <- isSubtype inner t2; return (ok1 && ok2 && ok3)
+      _              -> return False
+-- subty_shorten: #𝔞 T ≤ #𝔟 T  when 𝔟 ≤ 𝔞
+-- subty_double_affine: #𝔠 #𝔞 T ≤ #𝔟 T  when 𝔟 ≤ 𝔠 and 𝔟 ≤ 𝔞
+isSubtype (TyBang c t1) (TyBang b t2) = tryShorten `orM` tryCollapse
+  where
+    tryShorten  = do ok1 <- leq b c; ok2 <- isSubtype t1 t2; return (ok1 && ok2)
+    tryCollapse = case t1 of
+      TyBang a inner -> do ok1 <- leq b c; ok2 <- leq b a; ok3 <- isSubtype inner t2; return (ok1 && ok2 && ok3)
+      _              -> return False
+-- subty_affine_borrow: #𝔠 &𝔞 T ≤ &𝔟 T  when 𝔟 ≤ 𝔠 and 𝔟 ≤ 𝔞
+isSubtype (TyBang c (TyRef a t1)) (TyRef b t2) = do
+  ok1 <- leq b c; ok2 <- leq b a; ok3 <- isSubtype t1 t2
+  return (ok1 && ok2 && ok3)
 -- subty_unit: P𝔞() ≤ ()
 isSubtype (TyRef _ TyUnit) TyUnit  = return True
 isSubtype (TyBang _ TyUnit) TyUnit = return True
+-- subty_ptr_tuple: P𝔞(T₀×T₁) ≤ (P𝔞 T₀ × P𝔞 T₁)
+isSubtype (TyRef  a (TyPair t1 t2)) (TyPair (TyRef  b t1') (TyRef  c t2')) = do
+  ok1 <- isSubtype (TyRef  a t1) (TyRef  b t1')
+  ok2 <- isSubtype (TyRef  a t2) (TyRef  c t2')
+  return (ok1 && ok2)
+isSubtype (TyBang a (TyPair t1 t2)) (TyPair (TyBang b t1') (TyBang c t2')) = do
+  ok1 <- isSubtype (TyBang a t1) (TyBang b t1')
+  ok2 <- isSubtype (TyBang a t2) (TyBang c t2')
+  return (ok1 && ok2)
 -- subty_tuple
 isSubtype (TyPair t1 t2) (TyPair t1' t2') = do
   ok1 <- isSubtype t1 t1'
