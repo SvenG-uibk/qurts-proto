@@ -4,6 +4,7 @@
 *.dyn_hi
 *.dyn_o
 *.claude
+*.pdf
 dist/
 dist-newstyle/
 .stack-work/

@@ -303,9 +303,15 @@ checkStmt stmt = case stmt of
     checkStmt s1
     checkStmt s2
 
-  -- stmt_new_lifetime: add α to A
-  -- newlft α : (Γ, A) → (Γ, A ∪ {α})
-  SNewLft α -> addLifetime α
+  -- stmt_new_lifetime: add α to A, constrained below all existing lifetimes
+  -- newlft α : (Γ, A) → (Γ, A' where A' includes {α ≤ γ | γ ∈ A_ex})
+  -- A_ex = lifetimes already in A (excluding α itself, in case it's already present)
+  SNewLft α -> do
+    lp <- getLfts
+    let externalLfts = Set.delete α (ltVars lp)
+    addLifetime α
+    forM_ (Set.toList externalLfts) $ \γ ->
+      addConstraint (LVar α) (LVar γ)
 
   -- stmt_end_lifetime: α minimal in A−{⊥}, &α not in Γ, defrost
   -- endlft α : (Γ, A) → (defrost_α(Γ), A − α)
