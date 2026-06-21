@@ -458,6 +458,11 @@ checkExpr (ECall fname lts args) = do
       -- expr_function: ∀i, α_i ∈ A (each provided lifetime must be active)
       forM_ lts requireActive
       let subst    = zip genericLfts lts
+      -- expr_function: ∀(α'_i ≤ α'_j) ∈ sig constraints, subst(α'_i) ≤ subst(α'_j) ∈ A
+      forM_ (Set.toList (ltRel (sigLifetime sig))) $ \(a, b) -> do
+        ok <- leq (substAtom subst a) (substAtom subst b)
+        unless ok $ throwError (OtherError
+          ("Lifetime constraint not satisfied in call to " ++ show fname))
       let paramTys = map (substType subst . snd) (sigParams sig)
       let retTy    = substType subst (sigReturn sig)
       unless (length args == length paramTys) $
