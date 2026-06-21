@@ -4,6 +4,7 @@ fn example_error < alpha , beta | > (p : # bot qbit) -> # bot qbit {
     let r = &alpha p ;
     let q = qif r { let q = [not](q) ; q } else { noop ; q } ;
     drop q ;
+    drop r;
     endlft alpha ;
     newlft beta ;
     let s = &beta q ;

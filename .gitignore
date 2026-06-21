@@ -7,6 +7,6 @@ dist/
 dist-newstyle/
 .stack-work/
 
-# Binaries (exclude all except the main interpreter)
+# Binaries (but keeping the qurts.exe)
 *.exe
 !qurts.exe

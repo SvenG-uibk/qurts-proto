@@ -30,8 +30,9 @@ data LifetimeAtom
 -- A: set of currently active lifetime variables
 -- R: preorder on A ∪ {⊥, ⊤}
 data LifetimePreorder = LifetimePreorder
-  { ltVars :: Set.Set Lifetime
-  , ltRel  :: Set.Set (LifetimeAtom, LifetimeAtom)
+  { ltParams :: [Lifetime]                           -- ordered generic lifetime parameters (declaration order)
+  , ltVars   :: Set.Set Lifetime
+  , ltRel    :: Set.Set (LifetimeAtom, LifetimeAtom)
   }
   deriving (Eq, Show)
 

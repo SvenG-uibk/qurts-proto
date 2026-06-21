@@ -39,10 +39,11 @@ data TypeError
 --   tcFuncs: signatures of all previously defined functions (for ECall)
 --   tcFunc : name of the current function (for external lifetime set A_ex)
 data TCState = TCState
-  { tcCtx   :: Context
-  , tcLfts  :: LifetimePreorder
-  , tcFuncs :: Map.Map FuncName Signature
-  , tcFunc  :: FuncName
+  { tcCtx     :: Context
+  , tcLfts    :: LifetimePreorder
+  , tcFuncs   :: Map.Map FuncName Signature
+  , tcFunc    :: FuncName
+  , tcPQFuncs :: Set.Set FuncName    -- functions verified to be purely quantum
   }
   deriving (Eq, Show)
 
@@ -177,7 +178,8 @@ noRefInCtx α = do
   Context m <- getCtx
   return $ not $ any (mentionsRef α . bindType) (Map.elems m)
   where
-    mentionsRef a (TyRef (LVar b) _) = a == b
+    mentionsRef a (TyRef (LVar b) t) = a == b || mentionsRef a t
+    mentionsRef a (TyRef _ t)        = mentionsRef a t
     mentionsRef a (TyBang _ t)       = mentionsRef a t
     mentionsRef a (TyPair t1 t2)     = mentionsRef a t1 || mentionsRef a t2
     mentionsRef _ _                  = False
@@ -188,14 +190,15 @@ noRefInCtx α = do
 -- ============================================================
 
 canDrop :: Type -> TC Bool
-canDrop TyBool        = return True           -- drop_bool
-canDrop TyUnit        = return True           -- drop_unit
-canDrop (TyRef _ _)   = return True           -- drop_borrow: &𝔞 T always droppable
+canDrop TyBool         = return True          -- drop_bool
+canDrop TyUnit         = return True          -- drop_unit
+canDrop TyQBit         = return False         -- qubits cannot be dropped (no-cloning)
+canDrop (TyRef _ _)    = return True          -- drop_borrow: &𝔞 T always droppable
 canDrop (TyPair t1 t2) = do                  -- drop_tuple
   d1 <- canDrop t1
   d2 <- canDrop t2
   return (d1 && d2)
-canDrop (TyBang a _)  = isActive a           -- drop_own: #𝔞 T droppable iff 𝔞 ∈ A
+canDrop (TyBang a _)   = isActive a          -- drop_own: #𝔞 T droppable iff 𝔞 ∈ A
 
 -- ============================================================
 -- Purely Quantum  (Figure 7)
@@ -207,20 +210,21 @@ isPurelyQuantumType (TyBang _ t)    = isPurelyQuantumType t  -- pq_ty_own
 isPurelyQuantumType (TyPair t1 t2)  = isPurelyQuantumType t1 && isPurelyQuantumType t2
 isPurelyQuantumType _               = False   -- bool, unit, &α T are not PQ
 
-isPurelyQuantumExpr :: Expr -> Bool
-isPurelyQuantumExpr (EMeas _)  = False        -- measurement is not PQ
-isPurelyQuantumExpr (EIf _ _ _) = False       -- classical if is not PQ
-isPurelyQuantumExpr _           = True        -- everything else is PQ for now
+isPurelyQuantumExpr :: Set.Set FuncName -> Expr -> Bool
+isPurelyQuantumExpr _ (EMeas _)       = False   -- measurement is not PQ
+isPurelyQuantumExpr _ (EIf _ _ _)     = False   -- classical if is not PQ
+isPurelyQuantumExpr pq (ECall f _ _)  = Set.member f pq  -- PQ only if called fn is PQ
+isPurelyQuantumExpr _ _               = True
 
-isPurelyQuantumStmt :: Stmt -> Bool
-isPurelyQuantumStmt (SSeq s1 s2)    = isPurelyQuantumStmt s1 && isPurelyQuantumStmt s2
-isPurelyQuantumStmt (SLetExpr _ e)  = isPurelyQuantumExpr e
-isPurelyQuantumStmt SNoop           = True
-isPurelyQuantumStmt (SDrop _)       = True
-isPurelyQuantumStmt _               = True    -- conservative: assume PQ unless known otherwise
+isPurelyQuantumStmt :: Set.Set FuncName -> Stmt -> Bool
+isPurelyQuantumStmt pq (SSeq s1 s2)   = isPurelyQuantumStmt pq s1 && isPurelyQuantumStmt pq s2
+isPurelyQuantumStmt pq (SLetExpr _ e) = isPurelyQuantumExpr pq e
+isPurelyQuantumStmt _ SNoop            = True
+isPurelyQuantumStmt _ (SDrop _)        = True
+isPurelyQuantumStmt _ _                = True
 
-isPurelyQuantumBlock :: Block -> Bool
-isPurelyQuantumBlock (Block s _) = isPurelyQuantumStmt s
+isPurelyQuantumBlock :: Set.Set FuncName -> Block -> Bool
+isPurelyQuantumBlock pq (Block s _) = isPurelyQuantumStmt pq s
 
 -- ============================================================
 -- Program / Function / Block  (Figure 17, 8)
@@ -228,19 +232,24 @@ isPurelyQuantumBlock (Block s _) = isPurelyQuantumStmt s
 
 -- typing_program: each function can only use previously defined ones
 checkProgram :: Program -> Either TypeError ()
-checkProgram (Program funs) = go Map.empty funs
+checkProgram (Program funs) = go Map.empty Set.empty funs
   where
-    go _ []     = Right ()
-    go env (f:fs) = do
-      case runTC (initState env f) (checkFunction f) of
+    go _ _ []     = Right ()
+    go env pqEnv (f:fs) = do
+      case runTC (initState env pqEnv f) (checkFunction f) of
         Left err -> Left err
-        Right () -> go (Map.insert (funName f) (funSig f) env) fs
+        Right () ->
+          let newPQ = if isPurelyQuantumBlock pqEnv (funBody f)
+                      then Set.insert (funName f) pqEnv
+                      else pqEnv
+          in go (Map.insert (funName f) (funSig f) env) newPQ fs
 
-    initState env f = TCState
-      { tcCtx   = buildInitialContext (funSig f)
-      , tcLfts  = buildInitialPreorder (funSig f)
-      , tcFuncs = env
-      , tcFunc  = funName f
+    initState env pqEnv f = TCState
+      { tcCtx     = buildInitialContext (funSig f)
+      , tcLfts    = buildInitialPreorder (funSig f)
+      , tcFuncs   = env
+      , tcFunc    = funName f
+      , tcPQFuncs = pqEnv
       }
 
 -- Build Γ from signature parameters, all Active
@@ -262,10 +271,22 @@ checkFunction (Function _name sig body) = do
 
 -- typing_block: run statement, exactly one variable left, return its type
 -- { S ; x } : T  when S : (Γ,A) → (x:T, A)
+-- Droppable active variables (references, booleans) are implicitly dropped at end of scope.
+-- Non-droppable active variables (e.g. #⊥ qbit) remaining after the block are a linearity error.
 checkBlock :: Block -> TC Type
 checkBlock (Block stmt retVar) = do
   checkStmt stmt
-  lookupActiveVar retVar
+  ty <- lookupActiveVar retVar
+  Context m <- getCtx
+  let activeOthers = [(v, bindType b) | (v, b) <- Map.toList m
+                                       , v /= retVar
+                                       , bindAlive b == Active]
+  forM_ activeOthers $ \(v, t) -> do
+    ok <- canDrop t
+    unless ok $ throwError (LinearityViolation ("Variable not consumed after block: " ++ show v))
+    removeVar v
+  removeVar retVar
+  return ty
 
 -- ============================================================
 -- Statements  (Figure 16)
@@ -311,10 +332,14 @@ checkStmt stmt = case stmt of
 
   -- stmt_borrow: let y = &α x
   -- freezes x with lifetime α, introduces y : &α T
+  -- Paper (Figure 16 stmt_borrow): requires ∀γ ∈ {γ | &^γ appears in T}, α ≤ γ ∈ A
   SLetRef y α x -> do
     ty <- lookupActiveVar x
-    -- check α is a valid lifetime (not ended)
     requireActive (LVar α)
+    forM_ (refLifetimes ty) $ \γ -> do
+      ok <- leq (LVar α) γ
+      unless ok $ throwError (OtherError
+        ("Borrow lifetime ordering violated: " ++ show α ++ " must be ≤ " ++ show γ))
     freezeVar x α
     insertVar y (TyRef (LVar α) ty)
 
@@ -413,16 +438,20 @@ checkExpr (EC _c x) = do
 checkExpr EInit0 = return (TyBang LTop TyQBit)
 checkExpr EInit1 = return (TyBang LTop TyQBit)
 
--- expr_function: f⟨α0,...⟩(x0,...) 
+-- expr_function: f⟨α0,...⟩(x0,...)
+-- Paper (Figure 15 expr_function): substitutes generic lifetimes α'_i with provided α_i
 checkExpr (ECall fname lts args) = do
   env <- gets tcFuncs
   case Map.lookup fname env of
     Nothing  -> throwError (UnknownFunction fname)
     Just sig -> do
-      -- check lifetime constraints from sig are satisfied
-      -- substitute lifetime variables in sig with provided lts
-      -- consume arguments
-      let paramTys = map snd (sigParams sig)
+      let genericLfts = ltParams (sigLifetime sig)
+      unless (length lts == length genericLfts) $
+        throwError (OtherError ("Wrong number of lifetime arguments: expected "
+          ++ show (length genericLfts) ++ ", got " ++ show (length lts)))
+      let subst    = zip genericLfts lts
+      let paramTys = map (substType subst . snd) (sigParams sig)
+      let retTy    = substType subst (sigReturn sig)
       unless (length args == length paramTys) $
         throwError (OtherError "Wrong number of arguments")
       forM_ (zip args paramTys) $ \(arg, expectedTy) -> do
@@ -430,19 +459,18 @@ checkExpr (ECall fname lts args) = do
         unless (actualTy == expectedTy) $
           throwError (TypeMismatch expectedTy actualTy)
         removeVar arg
-      return (sigReturn sig)
+      return retTy
 
 -- expr_classical_if: if x Bt else Bf
 -- x : bool, both branches return same type T
+-- Context consistency is enforced by checkBlock: each branch must consume all of Γ.
 checkExpr (EIf x bt bf) = do
   ty <- lookupActiveVar x
   case ty of
     TyBool -> do
       removeVar x
-      -- save context, check each branch
       ctxBefore <- getCtx
       t1 <- checkBlock bt
-      ctxBefore' <- getCtx  -- context after branch (should be same shape)
       putCtx ctxBefore
       t2 <- checkBlock bf
       unless (t1 == t2) $ throwError (TypeMismatch t1 t2)
@@ -451,23 +479,30 @@ checkExpr (EIf x bt bf) = do
 
 
 
+-- expr_quantum_if: qif x B|0⟩ B|1⟩
+-- x : &^α qbit stays in Δ (not consumed); branches typed under Γ (without x)
+-- Both branches must be PQ and return a PQ type T; result type is #^α T
 checkExpr (EQIf x bt bf) = do
   ty <- lookupActiveVar x
   case ty of
     TyRef α innerTy -> do
-      -- apply subty_borrow_affine: &α #𝔞 T ≤ &α T  (Figure 13)
       let baseInner = stripBang innerTy
       case baseInner of
         TyQBit -> do
           requireActive α
-          unless (isPurelyQuantumBlock bt) $
-            throwError (NotPurelyQuantum "qif then-branch contains measurement")
-          unless (isPurelyQuantumBlock bf) $
-            throwError (NotPurelyQuantum "qif else-branch contains measurement")
+          pqFuncs <- gets tcPQFuncs
+          unless (isPurelyQuantumBlock pqFuncs bt) $
+            throwError (NotPurelyQuantum "qif then-branch contains measurement or classical if")
+          unless (isPurelyQuantumBlock pqFuncs bf) $
+            throwError (NotPurelyQuantum "qif else-branch contains measurement or classical if")
+          -- x ∈ Δ: remove x so branches are typed under Γ (paper Figure 15 expr_quantum_if)
+          removeVar x
           ctxBefore <- getCtx
           t1 <- checkBlock bt
           putCtx ctxBefore
           t2 <- checkBlock bf
+          -- restore x: &^α qbit back into context (stays in Δ after expression)
+          insertVar x ty
           compatible <- isSubtype t1 t2 `orM` isSubtype t2 t1
           unless compatible $ throwError (TypeMismatch t1 t2)
           isT1Sub <- isSubtype t1 t2
@@ -523,3 +558,33 @@ isCopy (TyPair t1 t2) = do           -- cpy_tuple
   return (ok1 && ok2)
 isCopy (TyBang _ t)   = isCopy t     -- cpy_own: #𝔞 T copyable iff T copyable
 isCopy TyQBit         = return False  -- qubits are not copyable (no-cloning)
+
+-- ============================================================
+-- Lifetime substitution helpers  (for expr_function, Figure 15)
+-- ============================================================
+
+-- Substitute a single LifetimeAtom given a mapping from generic Lifetime vars
+substAtom :: [(Lifetime, LifetimeAtom)] -> LifetimeAtom -> LifetimeAtom
+substAtom subst (LVar α) = case lookup α subst of
+  Just atom -> atom
+  Nothing   -> LVar α
+substAtom _ atom = atom
+
+-- Apply lifetime substitution throughout a Type
+substType :: [(Lifetime, LifetimeAtom)] -> Type -> Type
+substType _     TyBool           = TyBool
+substType _     TyQBit           = TyQBit
+substType _     TyUnit           = TyUnit
+substType subst (TyPair t1 t2)   = TyPair (substType subst t1) (substType subst t2)
+substType subst (TyRef a t)      = TyRef  (substAtom subst a)  (substType subst t)
+substType subst (TyBang a t)     = TyBang (substAtom subst a)  (substType subst t)
+
+-- Collect all &^γ lifetime atoms that appear directly as reference heads in a type
+-- Used to verify the lifetime ordering constraint in stmt_borrow (Figure 16)
+refLifetimes :: Type -> [LifetimeAtom]
+refLifetimes TyBool           = []
+refLifetimes TyQBit           = []
+refLifetimes TyUnit           = []
+refLifetimes (TyPair t1 t2)   = refLifetimes t1 ++ refLifetimes t2
+refLifetimes (TyRef γ t)      = γ : refLifetimes t
+refLifetimes (TyBang _ t)     = refLifetimes t

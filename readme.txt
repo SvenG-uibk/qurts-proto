@@ -18,4 +18,4 @@ When everything is compiled, we can run either just the parser or parse+type-che
 .\qurts parse examples\example_final.qurts-core
 .\qurts check examples\example_final.qurts-core
 
-
+normal git add . , commit -m, push

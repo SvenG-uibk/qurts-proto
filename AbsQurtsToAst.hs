@@ -45,8 +45,9 @@ convertParam (B.Param ident ty) = (convertVar ident, convertType ty)
 
 convertLifetimeContext :: B.LifetimeContext -> LifetimePreorder
 convertLifetimeContext (B.LifetimeContext lifetimes constraints) = LifetimePreorder
-  { ltVars = Set.fromList (map convertLifetimeToVar lifetimes)
-  , ltRel  = Set.fromList (map convertConstraint constraints)
+  { ltParams = map convertLifetimeToVar lifetimes
+  , ltVars   = Set.fromList (map convertLifetimeToVar lifetimes)
+  , ltRel    = Set.fromList (map convertConstraint constraints)
   }
 
 -- Extract just the variable name from a lifetime for the var set
