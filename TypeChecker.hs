@@ -114,6 +114,9 @@ orM a b = do { x <- a; if x then return True else b }
 getLfts :: TC LifetimePreorder
 getLfts = gets tcLfts
 
+putLfts :: LifetimePreorder -> TC ()
+putLfts lp = modify (\st -> st { tcLfts = lp })
+
 -- Check α ∈ A  (i.e. α is currently active, α > ⊥)
 isActive :: LifetimeAtom -> TC Bool
 isActive LBottom    = return False   -- ⊥ is never in A as a variable
@@ -275,7 +278,16 @@ checkFunction (Function _name sig body) = do
 -- Non-droppable active variables (e.g. #⊥ qbit) remaining after the block are a linearity error.
 checkBlock :: Block -> TC Type
 checkBlock (Block stmt retVar) = do
+  lftsBefore <- getLfts
   checkStmt stmt
+  lftsAfter <- getLfts
+  -- typing_block: A must not gain new lifetime variables across the block.
+  -- Lifetimes introduced by newlft inside the block must all be ended by endlft.
+  -- (Pre-existing lifetimes ended by endlft are allowed — no internal/external distinction.)
+  let leaked = Set.difference (ltVars lftsAfter) (ltVars lftsBefore)
+  unless (Set.null leaked) $
+    throwError (OtherError ("Lifetime introduced in block was not ended: "
+      ++ show (Set.toList leaked)))
   ty <- lookupActiveVar retVar
   Context m <- getCtx
   let activeOthers = [(v, bindType b) | (v, b) <- Map.toList m
@@ -482,9 +494,11 @@ checkExpr (EIf x bt bf) = do
   case ty of
     TyBool -> do
       removeVar x
-      ctxBefore <- getCtx
+      ctxBefore  <- getCtx
+      lftsBefore <- getLfts
       t1 <- checkBlock bt
-      putCtx ctxBefore
+      putCtx  ctxBefore
+      putLfts lftsBefore
       t2 <- checkBlock bf
       unless (t1 == t2) $ throwError (TypeMismatch t1 t2)
       return t1
@@ -510,9 +524,11 @@ checkExpr (EQIf x bt bf) = do
             throwError (NotPurelyQuantum "qif else-branch contains measurement or classical if")
           -- x ∈ Δ: remove x so branches are typed under Γ (paper Figure 15 expr_quantum_if)
           removeVar x
-          ctxBefore <- getCtx
+          ctxBefore  <- getCtx
+          lftsBefore <- getLfts
           t1 <- checkBlock bt
-          putCtx ctxBefore
+          putCtx  ctxBefore
+          putLfts lftsBefore
           t2 <- checkBlock bf
           -- restore x: &^α qbit back into context (stays in Δ after expression)
           insertVar x ty
