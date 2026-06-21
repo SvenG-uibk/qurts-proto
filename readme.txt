@@ -1,8 +1,8 @@
 lexer and parser is explained in the BNFC folder, but hopefully these dont need to be changed anymore for now.
 
-compile the Main.hs file (in the BNFC folder, not sure why I have it in that folder instead of root)
+compile the Main.hs file
 which does the following: takes qurts-core code and runs the parser on it and also converts it to the syntax
-that I defined in Ast.hs
+that I defined in Ast.hs, then runs the type checker (if the flag is set)
 
 ghc -ibnfc -ibnfc/bnfc-output bnfc/Main.hs AbsQurtsToAst.hs Ast.hs TypeChecker.hs -o qurts
 
