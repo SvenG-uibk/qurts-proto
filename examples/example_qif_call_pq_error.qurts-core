@@ -1,0 +1,20 @@
+fn measure_qubit < | > (x : # bot qbit) -> # top bool {
+    let b = meas(x) ;
+    b
+} ;
+
+fn example_qif_call_pq_error < alpha | > (p : # bot qbit) -> # top bool {
+    let q = [0]() ;
+    newlft alpha ;
+    let r = &alpha q ;
+    let result = qif r {
+        let b = measure_qubit<>(p) ;
+        b
+    } else {
+        let b = measure_qubit<>(p) ;
+        b
+    } ;
+    drop r ;
+    endlft alpha ;
+    result
+}

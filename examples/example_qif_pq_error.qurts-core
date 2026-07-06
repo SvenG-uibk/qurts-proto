@@ -1,0 +1,16 @@
+fn example_qif_pq_error < alpha | > (p : # bot qbit) -> # bot qbit {
+    let q = [0]() ;
+    newlft alpha ;
+    let r = &alpha q ;
+    let result = qif r {
+        let b = meas(p) ;
+        p
+    } else {
+        noop ;
+        p
+    } ;
+    drop r ;
+    endlft alpha ;
+    drop q ;
+    result
+}
