@@ -1,0 +1,11 @@
+fn nott < | > (x : # bot qbit) -> # bot qbit {
+    let result = [not](x) ;
+    result
+} ;
+
+fn example_call < | > () -> # bot qbit {
+    let q = [0]() ;
+    q as # bot qbit ;
+    let result = nott<>(q) ;
+    result
+}

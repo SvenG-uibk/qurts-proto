@@ -1,0 +1,10 @@
+fn example_if < | > (b : bool) -> # top bool {
+    let result = if b {
+        let r = true ;
+        r
+    } else {
+        let r = false ;
+        r
+    } ;
+    result
+}

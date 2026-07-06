@@ -1,0 +1,5 @@
+fn example_leq < alpha , beta | beta <= alpha > (x : & alpha qbit) -> & beta qbit {
+    let r = copy x ;
+    r as & beta qbit ;
+    r
+}

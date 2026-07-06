@@ -1,0 +1,12 @@
+fn example_copy < alpha | > (x : & alpha qbit) -> # alpha qbit {
+    let r = copy x ;
+    drop r ;
+    let result = qif x {
+        let q = [0]() ;
+        q
+    } else {
+        let q = [1]() ;
+        q
+    } ;
+    result
+}

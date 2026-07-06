@@ -1,0 +1,8 @@
+fn example_pair < | > () -> # top qbit {
+    let x = [0]() ;
+    let y = [1]() ;
+    let p = (x, y) ;
+    let (a, b) = p ;
+    drop b ;
+    a
+}
