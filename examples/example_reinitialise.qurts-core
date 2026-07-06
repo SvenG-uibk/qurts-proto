@@ -1,0 +1,11 @@
+fn reinitialise < alpha | > (x : # alpha qbit , y : & alpha qbit) -> # alpha qbit {
+    let result = qif y {
+        drop x ;
+        let q = [0]() ;
+        q
+    } else {
+        noop ;
+        x
+    } ;
+    result
+}

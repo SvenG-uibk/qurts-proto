@@ -1,0 +1,4 @@
+fn forget < alpha | > (x : # alpha qbit) -> () {
+    let unit = () ;
+    unit
+}

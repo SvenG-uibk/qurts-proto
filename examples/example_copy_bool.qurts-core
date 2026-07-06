@@ -1,0 +1,6 @@
+fn example_copy_bool < | > () -> # top bool {
+    let b = true ;
+    let b2 = copy b ;
+    drop b2 ;
+    b
+}

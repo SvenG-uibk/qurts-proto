@@ -1,0 +1,6 @@
+fn example_copy_qubit_error < | > () -> # top qbit {
+    let q = [0]() ;
+    let q2 = copy q ;
+    drop q2 ;
+    q
+}

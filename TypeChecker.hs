@@ -534,10 +534,12 @@ checkExpr (EQIf x bt bf) = do
           insertVar x ty
           compatible <- isSubtype t1 t2 `orM` isSubtype t2 t1
           unless compatible $ throwError (TypeMismatch t1 t2)
+          unless (isPurelyQuantumType t1) $
+            throwError (NotPurelyQuantum ("qif then-branch return type is not PQ: " ++ show t1))
+          unless (isPurelyQuantumType t2) $
+            throwError (NotPurelyQuantum ("qif else-branch return type is not PQ: " ++ show t2))
           isT1Sub <- isSubtype t1 t2
-          let t = if isT1Sub then t1 else t2
-          unless (isPurelyQuantumType t) $
-            throwError (NotPurelyQuantum ("qif return type is not PQ: " ++ show t))
+          let t = if isT1Sub then t2 else t1
           return (TyBang α (stripBang t))
         _ -> throwError (NotAReference ty)
     _ -> throwError (NotAReference ty)
