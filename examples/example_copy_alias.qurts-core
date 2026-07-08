@@ -1,0 +1,23 @@
+fn toffoli < alpha | > (x : & alpha qbit , y : & alpha qbit , z : # alpha qbit) -> # alpha qbit {
+    let result = qif x {
+        let inner = qif y {
+            let r = [not](z) ;
+            r
+        } else {
+            noop ;
+            z
+        } ;
+        inner
+    } else {
+        noop ;
+        z
+    } ;
+    result
+} ;
+
+fn example_copy_alias < alpha | > (x : & alpha qbit , w : # alpha qbit) -> # alpha qbit {
+    let y = copy x ;
+    let z = copy x ;
+    let result = toffoli<alpha>(y, z, w) ;
+    result
+}
