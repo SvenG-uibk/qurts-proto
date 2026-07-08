@@ -18,4 +18,11 @@ When everything is compiled, we can run either just the parser or parse+type-che
 .\qurts parse examples\example_final.qurts-core
 .\qurts check examples\example_final.qurts-core
 
+To run all examples at once and verify they all produce the expected result:
+
+.\qurts test examples
+
+Files with _error in their name are expected to fail type-checking; all others must succeed.
+The command prints PASS/FAIL for each file and exits non-zero if anything is unexpected.
+
 normal git add . , commit -m, push

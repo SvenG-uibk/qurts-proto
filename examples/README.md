@@ -1,8 +1,14 @@
 # Qurts-core Examples
 
-Each *.qurts-core file can be run with:
+Run a single example:
 
 .\qurts check examples\<filename>.qurts-core
+
+Run all examples at once (20/20 should pass):
+
+.\qurts test examples
+
+Files with `_error` in their name are expected to fail type-checking; all others are expected to succeed. The test command exits with a non-zero status if any result is unexpected.
 
 ## Valid Examples
 
