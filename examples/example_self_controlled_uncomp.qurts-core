@@ -1,0 +1,20 @@
+fn example_self_controlled_uncomp < alpha | > (x : # alpha qbit , y : # alpha qbit) -> # alpha qbit {
+    let p = (x, y) ;
+    let res = [cnot](p) ;
+    let (x2, y2) = res ;
+    newlft beta ;
+    let r = &beta x2 ;
+    let y3 = qif r {
+        noop ;
+        y2
+    } else {
+        drop y2 ;
+        let q = [0]() ;
+        q as # beta qbit ;
+        q
+    } ;
+    drop y3 ;
+    drop r ;
+    endlft beta ;
+    x2
+}

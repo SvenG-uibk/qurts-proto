@@ -66,6 +66,20 @@ Subtyping — subty_shorten (Figure 13): &α T ≤ &β T when β ≤ α
 
 Takes x: &α qbit with a constraint β ≤ α, copies x to get another reference, coerces it to &β qbit via as, and returns it. Tests lifetime shortening — a reference valid for a longer lifetime can be used as one valid for a shorter lifetime.
 
+### example_cnot_reinit
+Kengo's qif example from section 5.1 - the "complicated qif" isnt actually here problematic here, but during uncomputation. on the other hand, we claim (and have soundness proof), that all our typechecked programs relate to a circuit (uncomputable)
+
+### example_self_controlled_uncomp
+this is the example from Kengo's email, not in the paper
+
+```
+// x, y: #’a qbit
+let (x, y) = [some classical circuit] (x, y);
+newlft ‘b (< ‘a)
+let y: #’b qbit = qif (&’b x) { y } else { drop(y); |0> }
+```
+the hard part for uncomputation will be the drop y3, as it requires reversing the qif, which is controlled by x2, which came from cnot x,y, it follows that the reverse circuit would need to be self-controlled
+
 ## Error Examples
 
 These programs are expected to fail with a type error.
