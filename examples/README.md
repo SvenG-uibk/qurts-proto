@@ -80,6 +80,11 @@ let y: #’b qbit = qif (&’b x) { y } else { drop(y); |0> }
 ```
 the hard part for uncomputation will be the drop y3, as it requires reversing the qif, which is controlled by x2, which came from cnot x,y, it follows that the reverse circuit would need to be self-controlled
 
+### example_section6_f
+from section 6
+
+The paper's function `f(mut x: qbit) -> (qbit, #'static qbit)` translated to Qurts-core. Applies H to x (making it linear, #⊥ qbit) and also produces a fresh |0⟩ with static lifetime (#⊤ qbit). Returns the pair. Demonstrates a function that mixes linear (#⊥) and always-affine (#⊤) qubits in its return type.
+
 ## Error Examples
 
 These programs are expected to fail with a type error.

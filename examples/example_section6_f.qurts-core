@@ -1,0 +1,6 @@
+fn f < | > (x : # bot qbit) -> # bot qbit * # top qbit {
+    let x2 = H(x) ;
+    let v = [0]() ;
+    let ret = (x2, v) ;
+    ret
+}
