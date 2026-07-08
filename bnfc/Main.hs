@@ -2,7 +2,7 @@ module Main where
 
 import System.Environment ( getArgs )
 import System.Exit        ( exitFailure )
-import System.Directory   ( listDirectory )
+import System.Directory   ( listDirectory, doesFileExist )
 import Data.List          ( isSuffixOf, isInfixOf, sort )
 
 import QurtsGrammar.Par   ( pProgram, myLexer )
@@ -89,20 +89,36 @@ testDir dir = do
 
 -- | Run a single test file and print the result.
 -- Returns True if the outcome matches the expectation.
+-- For _error files: if a <name>.expected sidecar file exists, the actual error
+-- message must contain the expected substring; otherwise any error suffices.
 runTest :: FilePath -> IO Bool
 runTest file = do
-  let expectError = "_error" `isInfixOf` file
+  let expectError  = "_error" `isInfixOf` file
+      base         = take (length file - length ".qurts-core") file
+      expectedFile = base ++ ".expected"
   contents <- readFile file
-  let tokens = myLexer contents
-  let outcome = case pProgram tokens of
-        Left  err    -> Left ("Parse error: " ++ err)
-        Right bnfc   -> case checkProgram (convertProgram bnfc) of
+  let outcome = case pProgram (myLexer contents) of
+        Left  err  -> Left ("Parse error: " ++ err)
+        Right bnfc -> case checkProgram (convertProgram bnfc) of
           Left  err  -> Left (show err)
           Right ()   -> Right ()
-  let (ok, label) = case (expectError, outcome) of
-        (False, Right ()) -> (True,  "PASS")
-        (True,  Left  _)  -> (True,  "PASS (expected error)")
-        (False, Left  e)  -> (False, "FAIL (unexpected error: " ++ e ++ ")")
-        (True,  Right ()) -> (False, "FAIL (expected to fail but type-checked successfully)")
+  mWant <- if expectError
+             then do exists <- doesFileExist expectedFile
+                     if exists then fmap (Just . trim) (readFile expectedFile)
+                               else return Nothing
+             else return Nothing
+  let (ok, label) = case (expectError, mWant, outcome) of
+        (False, _,         Right ())                      -> (True,  "PASS")
+        (True,  Nothing,   Left  _)                       -> (True,  "PASS (expected error)")
+        (True,  Just want, Left  got) | want `isInfixOf` got
+                                                          -> (True,  "PASS (expected: " ++ want ++ ")")
+        (True,  Just want, Left  got)                     -> (False, "FAIL (expected \""
+                                                                ++ want ++ "\", got: " ++ got ++ ")")
+        (False, _,         Left  e)                       -> (False, "FAIL (unexpected error: " ++ e ++ ")")
+        (True,  _,         Right ())                      -> (False, "FAIL (expected to fail but succeeded)")
   putStrLn $ label ++ "  " ++ file
   return ok
+
+trim :: String -> String
+trim = f . f
+  where f = reverse . dropWhile (`elem` " \t\n\r")
