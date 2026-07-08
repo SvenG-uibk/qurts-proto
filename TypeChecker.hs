@@ -430,12 +430,15 @@ checkExpr (EMeas x) = do
       return (TyBang LTop TyBool)
     _ -> throwError (TypeMismatch (TyBang LBottom TyQBit) ty)
 
--- expr_unitary: U(x) : #⊥ qbit^n  (Figure 15, expr_unitary)
--- consumes x : #𝔞 qbit, returns #⊥ qbit (not uncomputable)
+-- expr_unitary: U(x) : #⊥ qbit  (Figure 15, expr_unitary)
+-- consumes x : #⊥ qbit, returns #⊥ qbit
+-- Input must already be committed to linear use (#⊥); result is not uncomputable.
+-- Use `x as #⊥ qbit` before calling if x has an affine lifetime.
+-- (Unlike [c], a general unitary is not a classical injection, so it cannot be inverted.)
 checkExpr (EU _u x) = do
   ty <- lookupActiveVar x
   case ty of
-    TyBang _ TyQBit -> do
+    TyBang LBottom TyQBit -> do
       removeVar x
       return (TyBang LBottom TyQBit)
     _ -> throwError (TypeMismatch (TyBang LBottom TyQBit) ty)
