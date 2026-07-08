@@ -1,0 +1,18 @@
+fn example_cnot_reinit < alpha | > (x : # alpha qbit , z : & alpha qbit) -> # alpha qbit {
+    let v = [0]() ;
+    v as # alpha qbit ;
+    let p = (x, v) ;
+    let res = [cnot](p) ;
+    let (x2, y) = res ;
+    drop x2 ;
+    let y2 = qif z {
+        noop ;
+        y
+    } else {
+        drop y ;
+        let q = [0]() ;
+        q as # alpha qbit ;
+        q
+    } ;
+    y2
+}

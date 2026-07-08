@@ -440,14 +440,19 @@ checkExpr (EU _u x) = do
       return (TyBang LBottom TyQBit)
     _ -> throwError (TypeMismatch (TyBang LBottom TyQBit) ty)
 
--- expr_lifted: [c](x) : #𝔞 qbit  (Figure 15, expr_lifted)
--- consumes x : #𝔞 qbit, returns #𝔞 qbit (preserves lifetime = still uncomputable)
+-- expr_lifted: [c](x) : #𝔞 qbit^n  (Figure 15, expr_lifted)
+-- single qubit: consumes x : #𝔞 qbit, returns #𝔞 qbit
+-- pair of qubits: consumes x : (#𝔞 qbit × #𝔞 qbit), returns (#𝔞 qbit × #𝔞 qbit)
+--   (both qubits must share the same lifetime 𝔞, matching the paper's #𝔞 qbit²)
 checkExpr (EC _c x) = do
   ty <- lookupActiveVar x
   case ty of
     TyBang a TyQBit -> do
       removeVar x
       return (TyBang a TyQBit)
+    TyPair (TyBang a TyQBit) (TyBang b TyQBit) | a == b -> do
+      removeVar x
+      return (TyPair (TyBang a TyQBit) (TyBang b TyQBit))
     _ -> throwError (TypeMismatch (TyBang LBottom TyQBit) ty)
 
 -- EInit0 / EInit1: [0]() / [1]() : #⊤ qbit
