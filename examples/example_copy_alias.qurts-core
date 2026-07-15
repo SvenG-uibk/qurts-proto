@@ -17,7 +17,7 @@ fn toffoli < alpha | > (x : & alpha qbit , y : & alpha qbit , z : # alpha qbit) 
 
 fn example_copy_alias < alpha | > (x : & alpha qbit , w : # alpha qbit) -> # alpha qbit {
     let y = copy x ;
-    let z = copy x ;
+    let z = copy y ;
     let result = toffoli<alpha>(y, z, w) ;
     result
 }

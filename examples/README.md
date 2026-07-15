@@ -4,7 +4,7 @@ Run a single example:
 
 .\qurts check examples\<filename>.qurts-core
 
-Run all examples at once (20/20 should pass):
+Run all examples at once (22/22 should pass):
 
 .\qurts test examples
 
@@ -90,6 +90,23 @@ the hard part for uncomputation will be the drop y3, as it requires reversing th
 from section 6
 
 The paper's function `f(mut x: qbit) -> (qbit, #'static qbit)` translated to Qurts-core. Applies H to x (making it linear, #⊥ qbit) and also produces a fresh |0⟩ with static lifetime (#⊤ qbit). Returns the pair. Demonstrates a function that mixes linear (#⊥) and always-affine (#⊤) qubits in its return type.
+
+### example_grover.qurts-core
+Fig. 2 (Grover's algorithm for 3 qubits in Qurts), plus Appendix A's desugaring of that figure
+
+The "stupid" variant of Grover's algorithm, where the marked solution is available as a hardcoded truth table rather than passed in as a generic oracle. None of `oracle`, `non_zero`, or `phase` are stubs — all three are complete, working implementations: `oracle` hardcodes the target `|111⟩` via nested qif (3-input AND, mirroring `example_and.qurts-core`), `non_zero` marks everything except `|000⟩` (3-input OR) for the diffusion reflection, and `phase` is a one-line `[Z]` gate application. `Z` is a real gate here in exactly the same sense `H` is elsewhere in these examples: gate names passed to `EU`/`EC` (`H(x)`, `[not](x)`, `[Z](a)`, ...) are uninterpreted labels, not a registered/built-in set, so there's nothing missing or stubbed-out about calling `Z`. What qurts-core doesn't have is the paper's *abstract* `phase(π)` — a bare 0-qubit expression, since every expression form in the grammar takes exactly one qubit argument. Per Appendix A, that construct compiles down to a `Z` gate on a specific qubit anyway, so `phase` just is that compiled form.
+
+Appendix A spells out exactly what `qif &oracle(&x,&y,&z) { phase(𝜋) }` desugars to, and Section 3.1 explains the key step: "Calling [phase()] within the qif causes the Z gate to be applied to the qubit owned by tmp. The drop statement... uncomputes the temporary qubit... by applying the reverse operation of the function call [to oracle] to r and tmp." That is the crux of the whole example, and it's the opposite of what a first attempt might guess:
+- The phase does **not** get attached to some fresh scratch ancilla that's copied from the oracle's result and then discarded — copying-then-uncomputing that copy would cancel the very phase it was meant to apply (running the copy step backwards undoes it exactly).
+- Instead, the Z gate is applied **directly to `oracle`'s own result qubit** (`tmp`), and `drop tmp` only reverses `oracle`'s construction of `tmp`, not the Z gate applied on top of it. Since `oracle` is a self-inverse boolean circuit (nested qif, XOR-style) and Z is a separate, later operation on the same qubit, reversing just the former leaves the phase imprinted on `x,y,z` while `tmp` itself cleanly resets to `|0⟩` — this is the standard phase-kickback trick, expressed here purely through the type system's "drop a `#α` value while `α` is still active" rule rather than any explicit inverse-circuit code.
+- Since qurts-core's `qif` requires both branches to be Purely Quantum and can't return `()`, and there's no bare scalar-multiplication expression either, this whole `qif { phase() } else { noop }` step collapses to a single `phase<alpha>(tmp)` call (implemented as `[Z]`, a generic-lifetime EC application so `tmp` keeps its `#α` tag and stays droppable) — no borrowing of `tmp` itself is needed, since the paper confirms that's exactly what the sugar reduces to anyway.
+
+An earlier draft of this example got this backwards (it built a fresh marker qubit off of `tmp` and phase-flipped *that*), which would have been a well-typed but physically inert no-op. The version here follows the paper's explicit worked-out semantics instead.
+
+Everything else follows the paper's own translation notes for unrolling into qurts-core:
+- `x: &mut qbit` params become owned `x: #⊥ qbit` params, mutated by shadowing (`let x = H(x) ;` for each `x.H()`, since qurts-core has no `&mut`).
+- `for _ in 0..2` is manually unrolled into two copies of the loop body, since qurts-core has no loop construct.
+- `let x,y,z = grover_diffusion(x,y,z)` (the paper's 3-way destructuring sugar) becomes two nested-pair destructures, since qurts-core's `let (_,_) = _` only handles 2-tuples; returning three qubits likewise needs a nested pair `(x,y),z`.
 
 ## Error Examples
 
