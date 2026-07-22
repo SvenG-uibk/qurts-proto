@@ -4,7 +4,7 @@ Run a single example:
 
 .\qurts check examples\<filename>.qurts-core
 
-Run all examples at once (22/22 should pass):
+Run all examples at once (23/23 should pass):
 
 .\qurts test examples
 
@@ -107,6 +107,19 @@ Everything else follows the paper's own translation notes for unrolling into qur
 - `x: &mut qbit` params become owned `x: #⊥ qbit` params, mutated by shadowing (`let x = H(x) ;` for each `x.H()`, since qurts-core has no `&mut`).
 - `for _ in 0..2` is manually unrolled into two copies of the loop body, since qurts-core has no loop construct.
 - `let x,y,z = grover_diffusion(x,y,z)` (the paper's 3-way destructuring sugar) becomes two nested-pair destructures, since qurts-core's `let (_,_) = _` only handles 2-tuples; returning three qubits likewise needs a nested pair `(x,y),z`.
+
+### example_grover_amplified.qurts-core
+not from the paper — general amplitude amplification (Brassard–Høyer–Mosca–Tapp 2000), applied to the same 3-qubit search as `example_grover.qurts-core`
+
+The "smart" counterpart to `example_grover.qurts-core`: instead of copying the paper's fixed iteration count, the number of Grover iterations is derived from the number of marked solutions `M`. Model the state as a rotation by angle `θ = arcsin(√(M/N))` per iteration (`N=8` here); the optimal iteration count is `r = round(π/(4θ) − 1/2)`. For `M=1` (the single `|111⟩` solution in `example_grover.qurts-core`) this gives `θ≈20.7°` and `r=round(2.174−0.5)=2` — the paper's `for _ in 0..2` is already this formula's answer, it just isn't derived there. This example's oracle (below) marks `M=2` solutions, giving `θ=arcsin(√(2/8))=30°` and `r=round(1.5−0.5)=1` — so `grover_amplified` unrolls the oracle+diffusion loop **once**, not twice. Reusing `example_grover.qurts-core`'s `r=2` here would over-rotate past the amplitude peak and make the result *less* likely to be a solution, which is the point of the example: `r` must track `M`, not be copy-pasted between oracles.
+
+`oracle` is a real, derived truth table, not a placeholder: it marks exactly the satisfying assignments of the 3-variable CNF formula `(x∨y) ∧ (¬x∨¬y) ∧ (z)` — "exactly one of `x,y` is true, and `z` is true" — which has exactly `M=2` solutions, `x=0,y=1,z=1` and `x=1,y=0,z=1` (verified by exhaustively checking all 8 assignments). `phase`, `non_zero`, and `grover_diffusion` are reused verbatim from `example_grover.qurts-core`, since the diffusion operator (reflection about the uniform superposition) doesn't depend on `M` or on which states are marked.
+
+Building `oracle` surfaced a real qurts-core scoping rule worth recording: **a `qif` expression preserves only its own control variable across itself — every other droppable variable in scope (even one untouched by either branch) is silently dropped**, because `checkExpr EQIf` only ever explicitly re-inserts the control (`insertVar x ty`, after both branches are checked); everything else is whatever the *last-checked* branch's own end-of-block cleanup leaves behind, and that cleanup drops any `Active` binding that isn't the block's own `retVar`. Concretely: `let c1 = qif x {[1]()} else {[0]()} ; let c2 = qif y {...}` fails with `UnboundVariable "y"`, even though `y` is never touched by either of `c1`'s branches, and `copy`ing it first doesn't help — the copy gets swept the same way. `my_cnot`'s `qif x { [not](y) } else { noop; y }` only keeps `y` because `y` *is* the `else` branch's own `retVar`, not incidentally. This is why `oracle` here is one single 3-level nested `qif` over `x,y,z` (matching `example_grover.qurts-core`'s `oracle`/`non_zero` shape) rather than four independent per-clause `qif`s the way the Qiskit reference implementation structures it — a genuine multi-ancilla version, where each clause gets its own qubit computed by a separate statement, would need every later-needed variable explicitly threaded through each `qif`'s return value (nested pairs, since tuples here are binary) rather than left sitting in scope.
+
+Unlike `example_grover.qurts-core` (which mirrors the paper's Fig. 2 and leaves the qubits amplified but unmeasured), `grover_amplified` ends by calling `meas` on `x`, `y`, `z` and returning `#⊤ bool * #⊤ bool * #⊤ bool`. This is the point being illustrated: amplitude amplification only makes measuring a solution *likely* (probability `sin²((2r+1)θ)`, close to but not exactly 1 for integer `r`), not certain — so a real usage has to measure and get a classical result, rather than staying in the amplified-but-unread quantum state the way the paper's inner-loop-only snippet does.
+
+Quantum counting (Brassard–Høyer–Tapp 1998) is the companion technique for estimating `M` via phase estimation when it *isn't* known in advance; it's not implemented here since `M` is assumed known, per the scope of this example.
 
 ## Error Examples
 
