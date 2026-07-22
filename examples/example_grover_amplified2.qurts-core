@@ -3,23 +3,28 @@ fn phase < alpha | > (a : # alpha qbit) -> # alpha qbit {
     a
 } ;
 
-fn oracle < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit , w : & alpha # bot qbit) -> # alpha qbit {
-    let result = qif x {
-        let result = qif y {
-            let result = qif z {
-                let result = qif w {
-                    let r = [1]() ;
-                    r
-                } else {
-                    let r = [0]() ;
-                    r
-                } ;
-                result
-            } else {
-                let r = [0]() ;
-                r
-            } ;
-            result
+fn clause_or2 < alpha | > (a : & alpha # bot qbit , b : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif a {
+        let r = [0]() ;
+        r
+    } else {
+        let result = qif b {
+            let r = [0]() ;
+            r
+        } else {
+            let r = [1]() ;
+            r
+        } ;
+        result
+    } ;
+    result
+} ;
+
+fn clause_nand2 < alpha | > (a : & alpha # bot qbit , b : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif a {
+        let result = qif b {
+            let r = [1]() ;
+            r
         } else {
             let r = [0]() ;
             r
@@ -29,6 +34,120 @@ fn oracle < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & a
         let r = [0]() ;
         r
     } ;
+    result
+} ;
+
+fn clause_unit < alpha | > (a : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif a {
+        let r = [0]() ;
+        r
+    } else {
+        let r = [1]() ;
+        r
+    } ;
+    result
+} ;
+
+fn clause_impl < alpha | > (a : & alpha # bot qbit , b : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif a {
+        let result = qif b {
+            let r = [0]() ;
+            r
+        } else {
+            let r = [1]() ;
+            r
+        } ;
+        result
+    } else {
+        let r = [0]() ;
+        r
+    } ;
+    result
+} ;
+
+fn clause_or2_neg_second < alpha | > (a : & alpha # bot qbit , b : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif a {
+        let r = [0]() ;
+        r
+    } else {
+        let result = qif b {
+            let r = [1]() ;
+            r
+        } else {
+            let r = [0]() ;
+            r
+        } ;
+        result
+    } ;
+    result
+} ;
+
+fn all_satisfied6 < alpha | > (c1 : & alpha # alpha qbit , c2 : & alpha # alpha qbit , c3 : & alpha # alpha qbit , c4 : & alpha # alpha qbit , c5 : & alpha # alpha qbit , c6 : & alpha # alpha qbit) -> # alpha qbit {
+    let result = qif c1 {
+        let r = [0]() ;
+        r
+    } else {
+        let result = qif c2 {
+            let r = [0]() ;
+            r
+        } else {
+            let result = qif c3 {
+                let r = [0]() ;
+                r
+            } else {
+                let result = qif c4 {
+                    let r = [0]() ;
+                    r
+                } else {
+                    let result = qif c5 {
+                        let r = [0]() ;
+                        r
+                    } else {
+                        let result = qif c6 {
+                            let r = [0]() ;
+                            r
+                        } else {
+                            let r = [1]() ;
+                            r
+                        } ;
+                        result
+                    } ;
+                    result
+                } ;
+                result
+            } ;
+            result
+        } ;
+        result
+    } ;
+    result
+} ;
+
+fn oracle < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit , w : & alpha # bot qbit) -> # alpha qbit {
+    let x1 = copy x ;
+    let y1 = copy y ;
+    let c1 = clause_or2<alpha>(x1, y1) ;
+    let x2 = copy x ;
+    let y2 = copy y ;
+    let c2 = clause_nand2<alpha>(x2, y2) ;
+    let z3 = copy z ;
+    let c3 = clause_unit<alpha>(z3) ;
+    let x4 = copy x ;
+    let w4 = copy w ;
+    let c4 = clause_impl<alpha>(x4, w4) ;
+    let x5 = copy x ;
+    let w5 = copy w ;
+    let c5 = clause_or2_neg_second<alpha>(x5, w5) ;
+    let y6 = copy y ;
+    let z6 = copy z ;
+    let c6 = clause_or2_neg_second<alpha>(y6, z6) ;
+    let rc1 = &alpha c1 ;
+    let rc2 = &alpha c2 ;
+    let rc3 = &alpha c3 ;
+    let rc4 = &alpha c4 ;
+    let rc5 = &alpha c5 ;
+    let rc6 = &alpha c6 ;
+    let result = all_satisfied6<alpha>(rc1, rc2, rc3, rc4, rc5, rc6) ;
     result
 } ;
 

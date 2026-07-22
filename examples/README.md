@@ -119,7 +119,9 @@ Unlike `example_grover.qurts-core` (which mirrors the paper's Fig. 2 and leaves 
 I didnt do quantum counting yet, will just assume that the number of solutions is known, quantum counting would be done fully seperately anyway
 
 ### example_grover_amplified2.qurts-core
-expanded example_grover_amplified to 4 qubits (one marked state) and three iterations(because I cant get three iterations with just three qubits)
+expanded example_grover_amplified to 4 qubits and three iterations (because I cant get three iterations with just three qubits)
+
+`oracle` marks the unique solution of `(x∨y) ∧ (¬x∨¬y) ∧ (z) ∧ (¬x∨w) ∧ (x∨¬w) ∧ (y∨¬z)` — verified by brute force to be exactly one assignment, `x=0,y=1,z=1,w=0` — built the same clause-by-clause way as `example_grover_amplified.qurts-core`'s oracle: `clause_or2`, `clause_nand2`, `clause_unit`, `clause_impl` (¬a∨b), and `clause_or2_neg_second` (a∨¬b) each check one clause from only the variables it mentions, `all_satisfied6` ANDs the six results, and `oracle` just wires `copy`s of `x,y,z,w` into the six clause calls and borrows of the six results into the checker. Same reasoning as before for why it's structured this way instead of inline `qif`s: references can't be threaded through a `qif`'s own return value (Purely Quantum excludes them), so each clause has to be its own function call, not nested `qif`s sharing scope. The `x=0,y=1,z=1,w=0` solution never appears in the code itself, only in this description as a post-hoc check.
 
 
 ## Error Examples
