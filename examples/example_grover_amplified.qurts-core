@@ -3,50 +3,87 @@ fn phase < alpha | > (a : # alpha qbit) -> # alpha qbit {
     a
 } ;
 
-fn oracle < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit) -> # alpha qbit {
+fn clause_or2 < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif x {
+        let r = [0]() ;
+        r
+    } else {
+        let result = qif y {
+            let r = [0]() ;
+            r
+        } else {
+            let r = [1]() ;
+            r
+        } ;
+        result
+    } ;
+    result
+} ;
+
+fn clause_nand2 < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit) -> # alpha qbit {
     let result = qif x {
         let result = qif y {
-            let result = qif z {
-                let r = [0]() ;
-                r
-            } else {
-                let r = [0]() ;
-                r
-            } ;
-            result
+            let r = [1]() ;
+            r
         } else {
-            let result = qif z {
-                let r = [1]() ;
-                r
-            } else {
-                let r = [0]() ;
-                r
-            } ;
-            result
+            let r = [0]() ;
+            r
         } ;
         result
     } else {
-        let result = qif y {
-            let result = qif z {
-                let r = [1]() ;
-                r
-            } else {
-                let r = [0]() ;
-                r
-            } ;
-            result
+        let r = [0]() ;
+        r
+    } ;
+    result
+} ;
+
+fn clause_unit < alpha | > (z : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif z {
+        let r = [0]() ;
+        r
+    } else {
+        let r = [1]() ;
+        r
+    } ;
+    result
+} ;
+
+fn all_satisfied3 < alpha | > (c1 : & alpha # alpha qbit , c2 : & alpha # alpha qbit , c3 : & alpha # alpha qbit) -> # alpha qbit {
+    let result = qif c1 {
+        let r = [0]() ;
+        r
+    } else {
+        let result = qif c2 {
+            let r = [0]() ;
+            r
         } else {
-            let result = qif z {
+            let result = qif c3 {
                 let r = [0]() ;
                 r
             } else {
-                let r = [0]() ;
+                let r = [1]() ;
                 r
             } ;
             result
         } ;
         result
     } ;
+    result
+} ;
+
+fn oracle < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit) -> # alpha qbit {
+    let x1 = copy x ;
+    let y1 = copy y ;
+    let c1 = clause_or2<alpha>(x1, y1) ;
+    let x2 = copy x ;
+    let y2 = copy y ;
+    let c2 = clause_nand2<alpha>(x2, y2) ;
+    let z3 = copy z ;
+    let c3 = clause_unit<alpha>(z3) ;
+    let rc1 = &alpha c1 ;
+    let rc2 = &alpha c2 ;
+    let rc3 = &alpha c3 ;
+    let result = all_satisfied3<alpha>(rc1, rc2, rc3) ;
     result
 } ;
 
