@@ -1,0 +1,140 @@
+fn phase < alpha | > (a : # alpha qbit) -> # alpha qbit {
+    let a = [Z](a) ;
+    a
+} ;
+
+fn oracle < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit , w : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif x {
+        let result = qif y {
+            let result = qif z {
+                let result = qif w {
+                    let r = [1]() ;
+                    r
+                } else {
+                    let r = [0]() ;
+                    r
+                } ;
+                result
+            } else {
+                let r = [0]() ;
+                r
+            } ;
+            result
+        } else {
+            let r = [0]() ;
+            r
+        } ;
+        result
+    } else {
+        let r = [0]() ;
+        r
+    } ;
+    result
+} ;
+
+fn non_zero < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit , w : & alpha # bot qbit) -> # alpha qbit {
+    let result = qif x {
+        let r = [1]() ;
+        r
+    } else {
+        let result = qif y {
+            let r = [1]() ;
+            r
+        } else {
+            let result = qif z {
+                let r = [1]() ;
+                r
+            } else {
+                let result = qif w {
+                    let r = [1]() ;
+                    r
+                } else {
+                    let r = [0]() ;
+                    r
+                } ;
+                result
+            } ;
+            result
+        } ;
+        result
+    } ;
+    result
+} ;
+
+fn grover_diffusion < | > (x : # bot qbit , y : # bot qbit , z : # bot qbit , w : # bot qbit) -> # bot qbit * # bot qbit * # bot qbit * # bot qbit {
+    let x = H(x) ;
+    let y = H(y) ;
+    let z = H(z) ;
+    let w = H(w) ;
+    newlft alpha ;
+    let rx = &alpha x ;
+    let ry = &alpha y ;
+    let rz = &alpha z ;
+    let rw = &alpha w ;
+    let tmp = non_zero<alpha>(rx, ry, rz, rw) ;
+    let tmp = phase<alpha>(tmp) ;
+    drop tmp ;
+    endlft alpha ;
+    let x = H(x) ;
+    let y = H(y) ;
+    let z = H(z) ;
+    let w = H(w) ;
+    let xy = (x, y) ;
+    let xyz = (xy, z) ;
+    let xyzw = (xyz, w) ;
+    xyzw
+} ;
+
+fn grover_amplified2 < | > (x : # bot qbit , y : # bot qbit , z : # bot qbit , w : # bot qbit) -> # top bool * # top bool * # top bool * # top bool {
+    let x = H(x) ;
+    let y = H(y) ;
+    let z = H(z) ;
+    let w = H(w) ;
+    newlft alpha1 ;
+    let rx1 = &alpha1 x ;
+    let ry1 = &alpha1 y ;
+    let rz1 = &alpha1 z ;
+    let rw1 = &alpha1 w ;
+    let tmp1 = oracle<alpha1>(rx1, ry1, rz1, rw1) ;
+    let tmp1 = phase<alpha1>(tmp1) ;
+    drop tmp1 ;
+    endlft alpha1 ;
+    let step1 = grover_diffusion<>(x, y, z, w) ;
+    let (xyz1, w) = step1 ;
+    let (xy1, z) = xyz1 ;
+    let (x, y) = xy1 ;
+    newlft alpha2 ;
+    let rx2 = &alpha2 x ;
+    let ry2 = &alpha2 y ;
+    let rz2 = &alpha2 z ;
+    let rw2 = &alpha2 w ;
+    let tmp2 = oracle<alpha2>(rx2, ry2, rz2, rw2) ;
+    let tmp2 = phase<alpha2>(tmp2) ;
+    drop tmp2 ;
+    endlft alpha2 ;
+    let step2 = grover_diffusion<>(x, y, z, w) ;
+    let (xyz2, w) = step2 ;
+    let (xy2, z) = xyz2 ;
+    let (x, y) = xy2 ;
+    newlft alpha3 ;
+    let rx3 = &alpha3 x ;
+    let ry3 = &alpha3 y ;
+    let rz3 = &alpha3 z ;
+    let rw3 = &alpha3 w ;
+    let tmp3 = oracle<alpha3>(rx3, ry3, rz3, rw3) ;
+    let tmp3 = phase<alpha3>(tmp3) ;
+    drop tmp3 ;
+    endlft alpha3 ;
+    let step3 = grover_diffusion<>(x, y, z, w) ;
+    let (xyz3, w) = step3 ;
+    let (xy3, z) = xyz3 ;
+    let (x, y) = xy3 ;
+    let bx = meas(x) ;
+    let by = meas(y) ;
+    let bz = meas(z) ;
+    let bw = meas(w) ;
+    let bxy = (bx, by) ;
+    let bxyz = (bxy, bz) ;
+    let bxyzw = (bxyz, bw) ;
+    bxyzw
+}
