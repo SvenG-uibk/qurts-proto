@@ -3,20 +3,26 @@
 -- function calls set aside.
 --
 -- Scope for this version: a `drop x` can be reversed when x's definition
--- chain, walked backward, consists of `let`-bound EU applications, bare
+-- chain, walked backward, consists of `let`-bound EU/EC applications, bare
 -- renames, &borrow bindings, and pair-destructures of a literal pair
 -- construction, terminating in [0]()/[1](). [1]() needs an inserted [not]
 -- flip (via EC, not EU -- see the FromInit1 case below for why) to actually
--- reach |0> before the point where the `drop` used to be. The `drop`
--- statement itself is then simply omitted, not replaced by another drop:
--- the reconstructed variable ends up with the same droppable type x always
--- had, and TypeChecker.hs's checkBlock implicitly drops any droppable
--- variable still active at the end of a block, so an explicit trailing
--- `drop` would be redundant (see uncomputeStmts below for the empirical
--- confirmation). Every other construct a chain might pass through (EC
--- applied to anything other than fixing up [1](), ECall, qif/if, dropping a
--- pair directly instead of destructuring it first) fails loudly with a
--- specific reason rather than silently doing nothing or guessing wrong.
+-- reach |0> before the point where the `drop` used to be. EC (classical
+-- injections like [not]/[cnot]/[swap]/[Z]) is only reversible for names in
+-- GateInverse.hs's classicalInverseTable, and only when what it's chained
+-- through is a single already-tracked value, not a pair whose two halves
+-- have been separately destructured (that needs the paper's split/merge
+-- pebble-game machinery, same as qif -- see FromPair/FromClassicalGate
+-- below for exactly where that line is drawn). The `drop` statement itself
+-- is then simply omitted, not replaced by another drop: the reconstructed
+-- variable ends up with the same droppable type x always had, and
+-- TypeChecker.hs's checkBlock implicitly drops any droppable variable
+-- still active at the end of a block, so an explicit trailing `drop` would
+-- be redundant (see uncomputeStmts below for the empirical confirmation).
+-- Every other construct a chain might pass through (ECall, qif/if, a pair
+-- destructured from an EC/ECall result rather than a literal pair
+-- construction) fails loudly with a specific reason rather than silently
+-- doing nothing or guessing wrong.
 module Uncompute
   ( uncomputeProgram
   , uncomputeFunction
@@ -27,7 +33,7 @@ module Uncompute
   ) where
 
 import Ast
-import GateInverse (unitaryInverse)
+import GateInverse (unitaryInverse, classicalInverse)
 import PrettyAst (flattenStmt)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -62,11 +68,12 @@ data Origin
   | FromTrivial                  -- true/false/()/copy/meas(_): Drop-trait, always droppable regardless of history
   | FromBorrow                   -- &a x: always droppable, no gate produced it
   | FromGate Unitary Origin      -- EU u prev, prev already resolved
+  | FromClassicalGate Classical Origin -- EC c prev, prev already resolved
   | FromPair Origin Origin       -- (x0,x1), components already resolved
   | FromUnbound Var              -- referenced a name with no known local definition
   | FromUnhandled Expr           -- a construct this pass doesn't chain through
-                                  -- (qif/if/call/EC-as-a-source); kept raw
-                                  -- only so describeExpr can explain why
+                                  -- (qif/if/call/pair-producing EC); kept
+                                  -- raw only so describeExpr can explain why
   deriving (Show)
 
 -- | Map from a variable name to what it's currently known to have come
@@ -117,6 +124,18 @@ resolveExpr _    (ECopy _)     = FromTrivial
 resolveExpr _    (EMeas _)     = FromTrivial
 resolveExpr defs (EVar x)      = resolveVar defs x
 resolveExpr defs (EU u x)      = FromGate u (resolveVar defs x)
+-- EC c x: chased through unconditionally, same as EU, regardless of what x
+-- resolves to -- including when x is itself a FromPair (e.g. [cnot](p)).
+-- That's deliberately harmless, not a scope creep into the pair-producing
+-- case still marked "not handled" below: reverseOrigin's FromPair case is
+-- unchanged, so a *destructured* half of an EC-on-a-pair result (the
+-- example_cnot_reinit shape) still resolves to FromUnbound at the
+-- SLetPair site exactly as before (recordBinding's SLetPair case only
+-- unwraps a bare FromPair, not one wrapped in FromClassicalGate) and still
+-- reports "no local definition found", unchanged. What this newly enables
+-- is only the case where the EC result itself -- not a destructured half
+-- of it -- is what eventually gets dropped or chained through further.
+resolveExpr defs (EC c x)      = FromClassicalGate c (resolveVar defs x)
 resolveExpr defs (EPair x0 x1) = FromPair (resolveVar defs x0) (resolveVar defs x1)
 resolveExpr _    e             = FromUnhandled e
 
@@ -142,7 +161,6 @@ describeExpr :: Expr -> String
 describeExpr (ECall (FuncName f) _ _) = "a function call (" ++ show f ++ "): reversing a call means the callee's own body must be reversible too, not handled yet"
 describeExpr (EQIf _ _ _)             = "a qif expression: set aside for now (needs the paper's split/merge pebble-game rule)"
 describeExpr (EIf _ _ _)              = "a classical if expression: not handled yet"
-describeExpr (EC (Classical c) _)     = "a classical injection ([" ++ show c ++ "](...)): EC has no inverse table yet, only EU does"
 describeExpr other                    = show other
 
 -- | Pick a fresh variable name not already used anywhere in the function
@@ -210,6 +228,24 @@ reverseOrigin reserved n (FromGate u prev) currentVar = do
   invU <- note ("no known inverse for unitary gate " ++ show u) (unitaryInverse u)
   let (fresh, n') = freshVar reserved n
       step        = SLetExpr fresh (EU invU currentVar)
+  (restStmts, finalVar, n'') <- reverseOrigin reserved n' prev fresh
+  Right (step : restStmts, finalVar, n'')
+-- EC c prev: same shape as the EU case just above, using GateInverse.hs's
+-- classicalInverse table instead. Note this never gets applied to a value
+-- still bundled as a pair from the *caller's* point of view in a way that
+-- would be unsound: prev being FromPair here just means the EC's argument
+-- was itself a literal pair construction (e.g. `[cnot]((x0,x1))` written
+-- directly, no intermediate variable) -- currentVar is still a single named
+-- value at this point, so `[c^-1](currentVar)` is exactly as valid as any
+-- other EC application. The genuinely unhandled case -- reversing one
+-- already-destructured half of a jointly-computed EC pair result while its
+-- sibling is still live -- never reaches here: recordBinding's SLetPair
+-- case only unwraps a bare FromPair, not a FromClassicalGate-wrapped one,
+-- so a destructured half stays FromUnbound and fails at the lookup instead.
+reverseOrigin reserved n (FromClassicalGate c prev) currentVar = do
+  invC <- note ("no known inverse for classical injection " ++ show c) (classicalInverse c)
+  let (fresh, n') = freshVar reserved n
+      step        = SLetExpr fresh (EC invC currentVar)
   (restStmts, finalVar, n'') <- reverseOrigin reserved n' prev fresh
   Right (step : restStmts, finalVar, n'')
 -- A pair dropped whole (never destructured): Fig. 6's drop_tuple rule makes

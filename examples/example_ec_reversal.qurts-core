@@ -1,0 +1,8 @@
+fn example_ec_reversal < | > () -> # top qbit {
+    let scratch = [0]() ;
+    let flipped = [not](scratch) ;
+    let unflipped = [not](flipped) ;
+    drop unflipped ;
+    let ret = [0]() ;
+    ret
+}

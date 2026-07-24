@@ -4,11 +4,11 @@ Run a single example:
 
 .\qurts check examples\<filename>.qurts-core
 
-Run all examples at once (24/24 should pass):
+Run all examples at once (25/25 should pass):
 
 .\qurts test examples
 
-Files with `_error` in their name are expected to fail type-checking; all others are expected to succeed. The test command exits with a non-zero status if any result is unexpected.
+Files with _error in their name are expected to fail type-checking; all others are expected to succeed. The test command exits with a non-zero status if any result is unexpected.
 
 ## Valid Examples
 
@@ -78,12 +78,12 @@ Kengo's qif example from section 5.1 - the "complicated qif" isnt actually here 
 ### example_self_controlled_uncomp
 this is the example from Kengo's email, not in the paper
 
-```
+
 // x, y: #'a qbit
 let (x, y) = [some classical circuit] (x, y);
 newlft 'b (< 'a)
 let y: #'b qbit = qif (&'b x) { y } else { drop(y); |0> }
-```
+
 
 the hard part for uncomputation will be the drop y3, as it requires reversing the qif, which is controlled by x2, which came from cnot x,y, it follows that the reverse circuit would need to be self-controlled
 
@@ -113,16 +113,21 @@ The "smart" counterpart to example_grover.qurts-core: instead of copying the pap
 
 oracle marks exactly the satisfying assignments of the 3-variable CNF formula (x∨y) ∧ (¬x∨¬y) ∧ (z) — "exactly one of x,y is true, and z is true" — which has exactly M=2 solutions, x=0,y=1,z=1 and x=1,y=0,z=1. Unlike a flat hardcoded truth table, oracle is now built *from the clauses*, the way it would need to be if the solution weren't already known: clause_or2, clause_nand2, and clause_unit each compute one clause's own "violated" bit from only the variables that clause mentions, and all_satisfied3 ANDs the three "not violated" bits together. oracle itself just wires these together — copys of x/y/z into each clause function (since each is a separate function call, consuming its arguments), then borrows of the three clause results into all_satisfied3. This sidesteps a real qurts-core restriction: qif requires both branches to be Purely Quantum, which excludes references entirely (Fig. 7: "does not include any booleans or references"), so a reference like x can never be threaded through as part of a qif's own return value — only owned qubits can. Trying to compute all three clauses via *inline* nested qifs inside one function hits this immediately (a qif on x silently drops y and z from scope, since only its own control variable survives it — see below); factoring each clause out into its own top-level function avoids it, because ordinary sequential statements (copy, function calls) don't have that problem, only qif/if branches do. phase, non_zero, and grover_diffusion are reused verbatim from example_grover.qurts-core, since the diffusion operator (reflection about the uniform superposition) doesn't depend on M or on which states are marked.
 
-Building oracle had me thinking that I found a bug: **a qif expression preserves only its own control variable across itself — every other droppable variable in scope (even one untouched by either branch) is silently dropped**, because checkExpr EQIf only ever explicitly re-inserts the control (insertVar x ty, after both branches are checked); everything else is whatever the *last-checked* branch's own end-of-block cleanup leaves behind, and that cleanup drops any Active binding that isn't the block's own retVar. this is NOT what the rust-like scope would do, which is supposedly used in the paper. After some checking, im quite sure this is NOT a bug in the typechecker though: this only applies to full qurts. in qurts-core, we are doing it correctly and the idea was to hide this from the programmer in full-qurts.
+Note: a qif expression preserves only its own control variable across itself — every other droppable variable in scope, even one untouched by either branch, is dropped (checkExpr EQIf only ever explicitly re-inserts the control; everything else is whatever the last-checked branch's own end-of-block cleanup leaves behind). This is intentional in qurts-core, not a typechecker bug — the idea is for full Qurts to hide this from the programmer via its own sugar.
 
 Unlike example_grover.qurts-core (which mirrors the paper's Fig. 2 and leaves the qubits amplified but unmeasured), grover_amplified ends by calling meas on x, y, z and returning #⊤ bool * #⊤ bool * #⊤ bool. This is the point being illustrated: amplitude amplification only makes measuring a solution *likely* (probability sin²((2r+1)θ), close to but not exactly 1 for integer r), not certain — so a real usage has to measure and get a classical result, rather than staying in the amplified-but-unread quantum state as in the paper.
 
-I didnt do quantum counting yet, will just assume that the number of solutions is known, quantum counting would be done fully seperately anyway
+Assumes the number of solutions M is known in advance; quantum counting (deriving M itself) is out of scope here.
 
 ### example_grover_amplified2.qurts-core
 expanded example_grover_amplified to 4 qubits and three iterations (because I cant get three iterations with just three qubits)
 
 oracle marks the unique solution of (x∨y) ∧ (¬x∨¬y) ∧ (z) ∧ (¬x∨w) ∧ (x∨¬w) ∧ (y∨¬z) — verified by brute force to be exactly one assignment, x=0,y=1,z=1,w=0 — built the same clause-by-clause way as example_grover_amplified.qurts-core's oracle: clause_or2, clause_nand2, clause_unit, clause_impl (¬a∨b), and clause_or2_neg_second (a∨¬b) each check one clause from only the variables it mentions, all_satisfied6 ANDs the six results, and oracle just wires copys of x,y,z,w into the six clause calls and borrows of the six results into the checker. Same reasoning as before for why it's structured this way instead of inline qifs: references can't be threaded through a qif's own return value (Purely Quantum excludes them), so each clause has to be its own function call, not nested qifs sharing scope. The x=0,y=1,z=1,w=0 solution never appears in the code itself, only in this description as a post-hoc check.
+
+### example_ec_reversal.qurts-core
+not from the paper — targets the `uncompute/` pass specifically (`EC`'s classical-injection reversal), not a Qurts-core language feature
+
+Initializes a scratch qubit at `|0⟩`, flips it twice via `[not]` (a classical injection, Section 3.1's "Lifted functions" — `[not]` is the 1-qubit lift of the `X`-gate), then drops it. Written to exercise `uncompute/Uncompute.hs`'s `FromClassicalGate` reversal chain: correctly reversing `drop unflipped` requires recursing through *two* separate `[not]` applications back to the `[0]()` origin, not just one, so it checks that the reversal recursion (not just a single base case) is right. Deliberately kept independent of `qif`/pairs/calls: this is the "single already-tracked value" case that `Uncompute.hs`'s `EC` support handles, as opposed to reversing one half of a jointly-computed pair (`example_cnot_reinit`'s harder case, which needs the same split/merge machinery as `qif` and isn't handled yet).
 
 ## Error Examples
 
