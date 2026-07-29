@@ -1,0 +1,309 @@
+module Main where
+
+import System.Environment ( getArgs )
+import System.Exit        ( exitFailure, ExitCode (..) )
+import System.Directory   ( listDirectory, doesFileExist, createDirectoryIfMissing )
+import System.FilePath    ( takeFileName, (</>) )
+import System.Process     ( createProcess, proc, CreateProcess (..), StdStream (..)
+                           , waitForProcess )
+import System.IO          ( hClose, hPutStr )
+import Control.Exception  ( try, IOException )
+import Data.List          ( isSuffixOf, isInfixOf, sort, intercalate )
+import Control.Monad      ( when )
+
+import QurtsGrammar.Par   ( pProgram, myLexer )
+import QurtsGrammar.Print ( printTree )
+
+import AbsQurtsToAst      ( convertProgram )
+import TypeChecker        ( checkProgram )
+import Uncompute          ( uncomputeProgram )
+import PrettyAst          ( prettyProgram )
+import Circuit             ( compileProgram, renderCircuit, Circuit )
+
+
+main :: IO ()
+main = do
+  args <- getArgs
+  case args of
+    ["-parse",     file] -> parseFile file
+    ["-check",     file] -> checkFile file
+    ["-uncompute", file] -> uncomputeFile file
+    ["-test",      dir]  -> testDir dir
+    ["-v",         file] -> runPipeline True  file
+    [file]                -> runPipeline False file
+    _                     -> usage
+
+usage :: IO ()
+usage = do
+  putStrLn "Usage:"
+  putStrLn "  qurts <file.qurts-core>            -- full pipeline (parse, check, uncompute,"
+  putStrLn "                                         circuit); prints only the resulting"
+  putStrLn "                                         circuit IR"
+  putStrLn "  qurts -v <file.qurts-core>          -- full pipeline; pretty-printed output"
+  putStrLn "                                         after every step"
+  putStrLn "  qurts -parse <file.qurts-core>      -- parse only"
+  putStrLn "  qurts -check <file.qurts-core>      -- parse and type check"
+  putStrLn "  qurts -uncompute <file.qurts-core>  -- parse, check, uncompute; writes the"
+  putStrLn "                                         re-translated qurts-core source to"
+  putStrLn "                                         examples-uncomputed/"
+  putStrLn "  qurts -test <directory>             -- parse+check every *.qurts-core in"
+  putStrLn "                                         directory; files with _error in the"
+  putStrLn "                                         name must fail, all others must succeed"
+  exitFailure
+
+die :: String -> IO a
+die msg = putStrLn ("ERROR: " ++ msg) >> exitFailure
+
+-- | Parse only -- lex, parse, print BNFC pretty print and our AST.
+parseFile :: FilePath -> IO ()
+parseFile file = do
+  contents <- readFile file
+  case pProgram (myLexer contents) of
+    Left err -> die ("parse error: " ++ err)
+    Right bnfcTree -> do
+      putStrLn "Parse successful!\n"
+      putStrLn "=== Pretty Printed ==="
+      putStrLn (printTree bnfcTree)
+      putStrLn ""
+      putStrLn "=== Our AST ==="
+      print (convertProgram bnfcTree)
+
+-- | Parse then type check.
+checkFile :: FilePath -> IO ()
+checkFile file = do
+  contents <- readFile file
+  case pProgram (myLexer contents) of
+    Left err -> die ("parse error: " ++ err)
+    Right bnfcTree -> do
+      putStrLn "Parse successful!"
+      let tree = convertProgram bnfcTree
+      putStrLn "=== Type Checking ==="
+      case checkProgram tree of
+        Left err -> die ("type error: " ++ show err)
+        Right () -> putStrLn "Type check successful!"
+
+-- | Parse, check, uncompute, re-translate to qurts-core source, and write
+-- the result into examples-uncomputed/ (mirroring uncompute/UncomputeMain.hs's
+-- own per-file behaviour, including its round-trip re-parse/re-check --
+-- an uncomputed program that doesn't check is a bug in Uncompute/PrettyAst,
+-- and this is the cheapest place to catch it).
+uncomputeFile :: FilePath -> IO ()
+uncomputeFile file = do
+  contents <- readFile file
+  case pProgram (myLexer contents) of
+    Left err -> die ("parse error: " ++ err)
+    Right bnfcTree -> do
+      let ast = convertProgram bnfcTree
+      case checkProgram ast of
+        Left err -> die ("does not type check: " ++ show err)
+        Right () -> case uncomputeProgram ast of
+          Left err -> die ("uncompute failed: " ++ err)
+          Right unc -> do
+            let printed = prettyProgram unc
+            case pProgram (myLexer printed) of
+              Left err -> die ("uncomputed output failed to re-parse (bug in Uncompute/PrettyAst): " ++ err)
+              Right bnfcTree2 -> case checkProgram (convertProgram bnfcTree2) of
+                Left err -> die ("uncomputed output failed to re-type-check (bug in Uncompute): " ++ show err)
+                Right () -> do
+                  createDirectoryIfMissing True "examples-uncomputed"
+                  let outPath = "examples-uncomputed" </> takeFileName file
+                  writeFile outPath printed
+                  putStrLn ("wrote " ++ outPath)
+
+-- | Full pipeline: parse, check, uncompute, compile to a circuit, then hand
+-- the circuit off to circuit/build_circuit.py to render as an actual Qiskit
+-- circuit diagram (not our own internal IR -- that IR is just the
+-- interchange format between this stage and Qiskit, see circuit/Circuit.hs).
+-- Quiet by default (only the diagram goes to stdout); -v prints a
+-- pretty-printed snapshot after every step along the way.
+runPipeline :: Bool -> FilePath -> IO ()
+runPipeline verbose file = do
+  contents <- readFile file
+  case pProgram (myLexer contents) of
+    Left err -> die ("parse error: " ++ err)
+    Right bnfcTree -> do
+      let ast = convertProgram bnfcTree
+      when verbose $ do
+        putStrLn "=== Parsed ==="
+        putStrLn (prettyProgram ast)
+        putStrLn "=== Our AST ==="
+        print ast
+        putStrLn ""
+      case checkProgram ast of
+        Left err -> die ("does not type check: " ++ show err)
+        Right () -> do
+          when verbose $ putStrLn "=== Type check: OK ===\n"
+          case uncomputeProgram ast of
+            Left err -> die ("uncompute failed: " ++ err)
+            Right unc -> do
+              when verbose $ do
+                putStrLn "=== Uncomputed ==="
+                putStrLn (prettyProgram unc)
+              case compileProgram unc of
+                Left err -> die ("circuit compilation failed: " ++ err)
+                Right circ -> do
+                  when verbose $ putStrLn "=== Circuit ==="
+                  showCircuit circ
+
+-- | Render a compiled Circuit the way Qiskit itself represents it: pipe our
+-- flat IR into circuit/build_circuit.py (over stdin, via its "-" filename)
+-- and let it print the ASCII circuit diagram it draws from the actual
+-- qiskit.QuantumCircuit it builds. Deliberately does *not* capture the
+-- child's stdout/stderr as a pipe and re-print it -- earlier versions did,
+-- and it mangled the box-drawing characters into mojibake on Windows
+-- (GHC's own console-codepage handling doesn't agree with a byte-for-byte
+-- forward through a pipe). Instead the child inherits our real stdout/
+-- stderr directly, so Python's own native Windows-console writing (which
+-- talks to the console API directly and doesn't depend on the console's
+-- codepage at all) does the job -- no forwarding to get wrong.
+-- Requires `python` on PATH with qiskit installed (see circuit/README.md);
+-- if that's not available, fails loudly with what went wrong and falls
+-- back to printing our own IR, so the tool still gives you *something*.
+showCircuit :: Circuit -> IO ()
+showCircuit circ = do
+  let ir = renderCircuit circ
+  result <- try (runBuildCircuit ir) :: IO (Either IOException ExitCode)
+  case result of
+    Right ExitSuccess -> return ()
+    Right (ExitFailure _) -> do
+      putStrLn "(circuit/build_circuit.py failed to render the Qiskit circuit -- see its output above)"
+      putStrLn "--- falling back to the raw circuit IR ---"
+      putStr ir
+    Left ex -> do
+      putStrLn ("(could not run `python circuit/build_circuit.py` (" ++ show ex ++ "); "
+                 ++ "is python on PATH, with qiskit installed?)")
+      putStrLn "--- falling back to the raw circuit IR ---"
+      putStr ir
+
+-- | Run build_circuit.py, feeding it `ir` over stdin; its stdout/stderr
+-- inherit ours directly (see showCircuit for why).
+runBuildCircuit :: String -> IO ExitCode
+runBuildCircuit ir = do
+  (Just hin, Nothing, Nothing, ph) <- createProcess
+    (proc "python" ["circuit/build_circuit.py", "-", "--draw"]) { std_in = CreatePipe }
+  hPutStr hin ir
+  hClose hin
+  waitForProcess ph
+
+-- | One pipeline stage's outcome for the -test table. StageNA covers both
+-- "never attempted" (an earlier stage already failed, or this is an
+-- _error file that's never meant to get this far) and "attempted but the
+-- stage before it in the table -- uncompute for circuit's row -- failed,
+-- so there's nothing to feed it."
+data Stage = StageOK | StageFail String | StageNA
+
+stageLabel :: Stage -> String
+stageLabel StageOK       = "OK"
+stageLabel (StageFail e) = "FAIL: " ++ e
+stageLabel StageNA       = "-"
+
+stageOk :: Stage -> Bool
+stageOk StageOK = True
+stageOk _       = False
+
+data TestRow = TestRow
+  { rowFile        :: FilePath
+  , rowExpectError :: Bool
+  , rowOk          :: Bool     -- parse+check matched expectation (drives PASS/FAIL and the exit code)
+  , rowLabel       :: String   -- PASS / PASS (expected error) / FAIL (...)
+  , rowUncompute   :: Stage
+  , rowCircuit     :: Stage
+  }
+
+-- | Run the full pipeline (parse, check, uncompute, circuit) over every
+-- *.qurts-core file in a directory and print one row per file. Convention,
+-- unchanged from before: files with "_error" in their name are expected to
+-- fail type-checking (and never proceed further); all other files are
+-- expected to succeed at parse+check -- that's what PASS/FAIL and the exit
+-- code are still keyed on. Uncompute/circuit are reported alongside for
+-- visibility but don't affect PASS/FAIL: partial coverage there is
+-- documented, expected scope (see uncompute/README.md, circuit/README.md),
+-- not a regression -- this table is for seeing the current shape of that
+-- coverage at a glance, not for it to start failing the moment a
+-- not-yet-handled example is added.
+testDir :: FilePath -> IO ()
+testDir dir = do
+  allFiles <- listDirectory dir
+  let files = sort [ dir ++ "/" ++ f | f <- allFiles, ".qurts-core" `isSuffixOf` f ]
+  rows <- mapM testFile files
+  putStrLn (formatTable rows)
+  let passed  = length (filter rowOk rows)
+      total   = length rows
+      nonErr  = filter (not . rowExpectError) rows
+      uncOk   = length (filter (stageOk . rowUncompute) nonErr)
+      circOk  = length (filter (stageOk . rowCircuit)   nonErr)
+  putStrLn ""
+  putStrLn $ "=== " ++ show passed ++ "/" ++ show total ++ " passed (parse+check) ==="
+  putStrLn $ "=== " ++ show uncOk ++ "/" ++ show (length nonErr) ++ " uncompute, "
+             ++ show circOk ++ "/" ++ show (length nonErr) ++ " compile to a circuit "
+             ++ "(informational -- doesn't affect pass/fail) ==="
+  if passed == total
+    then putStrLn "All tests passed!"
+    else do
+      putStrLn "Some tests FAILED."
+      exitFailure
+
+-- | Run one file through the pipeline and build its table row.
+-- For _error files: if a <name>.expected sidecar file exists, the actual
+-- error message must contain the expected substring; otherwise any error
+-- suffices. Non-error files that parse+check successfully go on to
+-- uncompute and (if that succeeds) circuit compilation, purely to fill in
+-- those two columns -- their outcome never changes rowOk/the exit code.
+testFile :: FilePath -> IO TestRow
+testFile file = do
+  let expectError  = "_error" `isInfixOf` file
+      base         = take (length file - length ".qurts-core") file
+      expectedFile = base ++ ".expected"
+  contents <- readFile file
+  case pProgram (myLexer contents) of
+    Left err -> return (TestRow file expectError False ("FAIL (parse error: " ++ err ++ ")") StageNA StageNA)
+    Right bnfcTree -> do
+      let ast = convertProgram bnfcTree
+      case checkProgram ast of
+        Left err
+          | expectError -> do
+              mWant <- do exists <- doesFileExist expectedFile
+                          if exists then fmap (Just . trim) (readFile expectedFile) else return Nothing
+              let got = show err
+              return $ case mWant of
+                Nothing                          -> TestRow file expectError True "PASS (expected error)" StageNA StageNA
+                Just want | want `isInfixOf` got  -> TestRow file expectError True ("PASS (expected: " ++ want ++ ")") StageNA StageNA
+                          | otherwise             -> TestRow file expectError False
+                                                        ("FAIL (expected \"" ++ want ++ "\", got: " ++ got ++ ")") StageNA StageNA
+          | otherwise ->
+              return (TestRow file expectError False ("FAIL (unexpected error: " ++ show err ++ ")") StageNA StageNA)
+        Right ()
+          | expectError ->
+              return (TestRow file expectError False "FAIL (expected to fail but succeeded)" StageNA StageNA)
+          | otherwise -> do
+              let (uncStage, circStage) = case uncomputeProgram ast of
+                    Left err  -> (StageFail err, StageNA)
+                    Right unc -> case compileProgram unc of
+                      Left err -> (StageOK, StageFail err)
+                      Right _  -> (StageOK, StageOK)
+              return (TestRow file expectError True "PASS" uncStage circStage)
+
+-- | Render the table: FILE, RESULT and UNCOMPUTE are column-aligned, padded
+-- to at least their header's own width so "OK"/"-" line up under it;
+-- CIRCUIT trails as free text. UNCOMPUTE's width deliberately ignores FAIL
+-- messages (only "OK"/"-" -- always short -- feed into it): a FAIL reason
+-- can be arbitrarily long, and padTo only ever pads up, never truncates,
+-- so that row's CIRCUIT just starts further right instead of every row
+-- (including all the plain "OK" ones) paying for the rare long one.
+formatTable :: [TestRow] -> String
+formatTable rows = intercalate "\n" (header : sep : map formatRow rows)
+  where
+    fileW  = maximum (length "FILE"   : map (length . rowFile)  rows)
+    lblW   = maximum (length "RESULT" : map (length . rowLabel) rows)
+    uncW   = maximum [length "UNCOMPUTE", length "OK", length "-"]
+    header = padTo fileW "FILE" ++ "  " ++ padTo lblW "RESULT" ++ "  " ++ padTo uncW "UNCOMPUTE" ++ "  CIRCUIT"
+    sep    = replicate (length header) '-'
+    formatRow r = padTo fileW (rowFile r) ++ "  " ++ padTo lblW (rowLabel r) ++ "  "
+                  ++ padTo uncW (stageLabel (rowUncompute r)) ++ "  " ++ stageLabel (rowCircuit r)
+
+padTo :: Int -> String -> String
+padTo n s = s ++ replicate (max 0 (n - length s)) ' '
+
+trim :: String -> String
+trim = f . f
+  where f = reverse . dropWhile (`elem` " \t\n\r")

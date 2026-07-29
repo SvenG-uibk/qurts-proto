@@ -5,3 +5,5 @@ cradle: #my IDE complains about some imports, this fixes that
       - -ibnfc
       - -ibnfc/bnfc-output
       - -iuncompute
+      - -icircuit
+      - -itypeChecker

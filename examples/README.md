@@ -2,13 +2,17 @@
 
 Run a single example:
 
-.\qurts check examples\<filename>.qurts-core
+.\qurts -check examples\<filename>.qurts-core
 
-Run all examples at once (25/25 should pass):
+Or run it through the full pipeline (parse, check, uncompute, compile to a circuit):
 
-.\qurts test examples
+.\qurts examples\<filename>.qurts-core
 
-Files with _error in their name are expected to fail type-checking; all others are expected to succeed. The test command exits with a non-zero status if any result is unexpected.
+Run all examples at once (27/27 should pass):
+
+.\qurts -test examples
+
+Files with _error in their name are expected to fail type-checking; all others are expected to succeed. `-test` exits with a non-zero status if any result is unexpected. See the root readme.txt for the full command list (`-parse`, `-uncompute`, `-v`, ...).
 
 ## Valid Examples
 
@@ -99,6 +103,7 @@ The "stupid" variant of Grover's algorithm, where the marked solution is availab
 
 Appendix A spells out exactly what qif &oracle(&x,&y,&z) { phase(𝜋) } desugars to, and Section 3.1 explains the key step: "Calling [phase()] within the qif causes the Z gate to be applied to the qubit owned by tmp." That is the crux of the whole example:
 - the Z gate is applied **directly to oracle's own result qubit** (tmp), and drop tmp only reverses oracle's construction of tmp, not the Z gate applied on top of it. Since oracle is a self-inverse boolean circuit (nested qif, XOR-style) and Z is a separate, later operation on the same qubit, reversing just the former leaves the phase imprinted on x,y,z while tmp itself cleanly resets to |0⟩ — this is the standard phase-kickback trick, expressed here purely through the type system's "drop a #α value while α is still active" rule rather than any explicit inverse-circuit code.
+  - **Correction, found via `uncompute/`+`circuit/`'s own pipeline (see `circuit/README.md`'s "Known issue" section):** this specific claim — that dropping tmp leaves the Z-imprinted phase on x,y,z intact — is false for *this* encoding. `Uncompute.hs` reverses `drop tmp1` through tmp1's *entire* recorded history, and because `let tmp1 = phase<alpha1>(tmp1);` is a *rebind*, `[Z]` is part of that history — so the reversal emits a second `[Z]`, which cancels the first (`Z·Z = I`), destroying the phase rather than preserving it. Confirmed by simulation: the compiled circuit gives a uniform distribution, not the expected peak at `|111⟩`; deleting only the reversal `[Z]` restores 94% on `|111⟩`. The type-level story above (droppable-while-active) is real, but it only argues that the *drop* is legal, not that the phase *survives* it — those turn out to be different questions once the value carrying the phase is the same one being dropped.
 - Since qurts-core's qif requires both branches to be Purely Quantum and can't return (), and there's no bare scalar-multiplication expression either, this whole qif { phase() } else { noop } step collapses to a single phase<alpha>(tmp) call (implemented as [Z], a generic-lifetime EC application so tmp keeps its #α tag and stays droppable) — no borrowing of tmp itself is needed, since the paper confirms that's exactly what the sugar reduces to anyway.
 
 Everything else follows the paper's own translation notes for unrolling into qurts-core:
@@ -128,6 +133,16 @@ oracle marks the unique solution of (x∨y) ∧ (¬x∨¬y) ∧ (z) ∧ (¬x∨w
 not from the paper — targets the `uncompute/` pass specifically (`EC`'s classical-injection reversal), not a Qurts-core language feature
 
 Initializes a scratch qubit at `|0⟩`, flips it twice via `[not]` (a classical injection, Section 3.1's "Lifted functions" — `[not]` is the 1-qubit lift of the `X`-gate), then drops it. Written to exercise `uncompute/Uncompute.hs`'s `FromClassicalGate` reversal chain: correctly reversing `drop unflipped` requires recursing through *two* separate `[not]` applications back to the `[0]()` origin, not just one, so it checks that the reversal recursion (not just a single base case) is right. Deliberately kept independent of `qif`/pairs/calls: this is the "single already-tracked value" case that `Uncompute.hs`'s `EC` support handles, as opposed to reversing one half of a jointly-computed pair (`example_cnot_reinit`'s harder case, which needs the same split/merge machinery as `qif` and isn't handled yet).
+
+### example_qif_reversal.qurts-core
+not from the paper — targets the `uncompute/` pass specifically (`qif` result reversal), not a Qurts-core language feature
+
+Structurally close to `example_final.qurts-core` (a `[1]()`-branch/`[0]()`-branch `qif` on a fresh `#⊥` qubit under a local lifetime), but with `drop y ; drop r ;` instead of `example_final`'s `drop r ; drop y ;` — the control dropped *after* the value whose reversal needs it, `example_valid.qurts-core`'s ordering, but combined here with `example_final`'s branch shape (needing an inserted `[not]`) rather than `example_valid`'s (`FromClassicalGate` on an outer variable). Neither existing paper example covers this combination on its own. Exercises `Uncompute.hs`'s `FromQIf` reversal together with both of its supporting fixes: `hasLaterEndlft` (the reconstructed value needs an explicit trailing `drop` before `endlft alpha`) and `collectDeferredBorrows` (the control's own `drop` must be suppressed and reused rather than processed where it appears in the source).
+
+### example_nested_call_reversal.qurts-core
+not from the paper — targets the `uncompute/` pass specifically (function-call reversal through *multiple* call boundaries), not a Qurts-core language feature
+
+`example_nested_call_reversal` calls `middle`, which itself calls `innermost` — whose own `qif` is controlled by its own parameter, two function-call boundaries away from the only place that parameter has a real, top-level name (`rx`, in `example_nested_call_reversal` itself). Written to check that `resolveExpr`'s `ECall` case's `renames`/`rcCopies` composition, previously only exercised one call level deep (`example_grover.qurts-core`'s `grover_diffusion` calling `non_zero` directly), still correctly translates a control's name all the way back to the top across a *second* level (`middle`'s own `c` -> `innermost`'s own `c`), and that `[not]` gates on either side of the call chain (`middle`'s own `[not]`, the one inserted by the reversal) compose correctly too. Confirmed both syntactically (round-trip re-verified) and physically by hand: the reconstruction reduces to `rev0 XOR c`, and `rev0` itself is `NOT(NOT(c)) = c`, so the result is `c XOR c = 0` on both branches of the `qif`.
 
 ## Error Examples
 

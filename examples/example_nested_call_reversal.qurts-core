@@ -1,0 +1,20 @@
+fn innermost < alpha | > (c : & alpha # top qbit) -> # alpha qbit {
+    let result = qif c { let r = [1]() ; r } else { let r = [0]() ; r } ;
+    result
+} ;
+
+fn middle < alpha | > (c : & alpha # top qbit) -> # alpha qbit {
+    let tmp = innermost<alpha>(c) ;
+    let result = [not](tmp) ;
+    result
+} ;
+
+fn example_nested_call_reversal < | > () -> # top qbit {
+    let x = [0]() ;
+    newlft alpha ;
+    let rx = &alpha x ;
+    let tmp = middle<alpha>(rx) ;
+    drop tmp ;
+    endlft alpha ;
+    x
+}
