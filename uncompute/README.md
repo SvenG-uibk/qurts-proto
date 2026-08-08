@@ -1,14 +1,20 @@
 # uncompute
 
-Automatic uncomputation for qurts-core (not part of the parser/type checker). Takes an already type-checked program and rewrites each `drop x` into the reversed sequence of operations that produced `x`, in place of the `drop` itself — usually with no trailing `drop`, since `TypeChecker.hs`'s `checkBlock` already implicitly drops any droppable variable still active at the end of a block; an explicit trailing `drop` is only inserted when a later `endlft` would otherwise intervene first (see `hasLaterEndlft` in `Uncompute.hs`). Naive strategy only: reversal happens exactly where the source already wrote `drop` (not the paper's more flexible pebble-game placement). `qif` and function calls each have a first, partial version — see below.
+Automatic uncomputation for qurts-core. Takes a type-checked program and rewrites each `drop x`
+into the reversed sequence of operations that produced `x`, in place of the `drop` itself.
+Reversal happens exactly where the source wrote `drop` (not the paper's more flexible
+pebble-game placement).
 
 ## Files
 
-- **GateInverse.hs** — inverse-lookup tables: `unitaryInverse` for `EU` (bare `H(x)`-style gates: `I`, `X`, `Y`, `Z`, `H`, `S`/`Sdg`, `T`/`Tdg`) and `classicalInverse` for `EC` (`[c](x)`-style lifted classical injections: `not`, `cnot`, `swap`, `Z`, all self-inverse). Both return `Nothing` for unrecognised names rather than assuming self-inverse — names are uninterpreted text, and a gate/injection can be arbitrary.
-- **PrettyAst.hs** — the reverse of `AbsQurtsToAst.hs`: renders an `Ast.hs` `Program` back to qurts-core source, so this pass's output can be fed straight back through `pProgram`/`checkProgram`.
-- **TestPrint.hs** — smoke test: parse → convert → pretty-print → re-parse/re-typecheck one file, to stdout.
-- **TestUncompute.hs** — same pipeline through the uncomputation pass itself (parse → check → uncompute → pretty-print → re-parse/re-typecheck), one file, to stdout.
-- **UncomputeMain.hs** — batch driver: runs that pipeline over every `*.qurts-core` file in a directory (or a single file) and writes the ones that succeed to an output directory.
+- **GateInverse.hs** — inverse-lookup tables for `EU` (`unitaryInverse`) and `EC`
+  (`classicalInverse`). Returns `Nothing` for unrecognised names rather than assuming self-inverse.
+- **PrettyAst.hs** — renders an `Ast.hs` `Program` back to qurts-core source, so this pass's
+  output can be re-parsed and re-type-checked.
+- **TestPrint.hs** — parse → convert → pretty-print → re-check, one file, to stdout.
+- **TestUncompute.hs** — same, through the uncomputation pass.
+- **UncomputeMain.hs** — batch driver: runs the pipeline over a directory (or one file) and
+  writes the files that succeed to an output directory.
 
 ## Building and running
 
@@ -17,59 +23,42 @@ Automatic uncomputation for qurts-core (not part of the parser/type checker). Ta
 
     ghc -i. -ibnfc -ibnfc/bnfc-output -iuncompute -itypeChecker uncompute/UncomputeMain.hs uncompute/Uncompute.hs uncompute/GateInverse.hs uncompute/PrettyAst.hs typeChecker/AbsQurtsToAst.hs typeChecker/Ast.hs typeChecker/TypeChecker.hs -o uncompute/uncompute-main
     ./uncompute/uncompute-main.exe                              # examples/ -> examples-uncomputed/
-    ./uncompute/uncompute-main.exe some-dir some-other-dir       # explicit input/output dirs
-    ./uncompute/uncompute-main.exe examples/example_final.qurts-core out  # single file
+    ./uncompute/uncompute-main.exe some-dir some-other-dir
+    ./uncompute/uncompute-main.exe examples/example_final.qurts-core out
 
-Per file: `OK <file> -> <outdir>/<file>` (parsed, checked, uncomputed, round-trip re-verified, written), or `SKIP <file>: <reason>` (nothing written). Files with `_error` in their name are skipped silently. Exits 0 regardless of `SKIP` count — partial coverage is expected, not a failure.
+Per file: `OK <file> -> <outdir>/<file>`, or `SKIP <file>: <reason>`. `_error` files are skipped
+silently. Exits 0 regardless of SKIP count — partial coverage is expected, not a failure.
 
-## Current coverage
+## Coverage
 
-17 of the 22 non-`_error` examples uncompute successfully (run the tool for per-file `SKIP` reasons). `Uncompute.hs`'s `DefMap`/`Origin` traces a `drop x` back through:
+18 of 23 non-`_error` examples uncompute successfully. Handled:
 
-- `let`-bound `EU` chains (`H(x)`-style) and `EC` chains (`[not](x)`-style, names in `classicalInverseTable`) on a single already-tracked value, terminating in `[0]()` (see `example_ec_reversal.qurts-core`).
-- `[1]()` — gets a `[not]` flip inserted via `EC`, not `EU` (see `example_pair.qurts-core`): `EU` is pinned to exactly `#⊥ qbit` in and out, and `#⊥` can never be widened back to a droppable type, so it can never itself reach a `drop`; `EC` preserves whatever lifetime the argument already has, so it can.
-- bare renames, `&borrow` bindings, `copy`/`true`/`false`/`()`/`meas(_)` results, and pair-destructure of a *literal* pair construction — all Drop-trait (Fig. 6), no reversal needed.
-- a whole (non-destructured) pair, when both components are themselves trivially droppable (Fig. 6's `drop_tuple`).
-- a function parameter whose *static* type is bool/unit/`&T`/a droppable pair thereof (no lifetime tracking needed to know that; a bare qubit parameter is left untracked, since that depends on lifetime activity this pass doesn't track).
-- `qif`, first version — see below.
-- function calls, first version — see below.
+- `EU`/`EC` gate chains on a single tracked value, back to `[0]()`.
+- bare renames, `&borrow`s, `copy`/`true`/`false`/`()`/`meas(_)`, pair-destructure of a literal pair.
+- a whole pair, when both components are trivially droppable.
+- a function parameter whose static type is bool/unit/`&T`/a droppable pair of those.
+- `qif`, first version: a qif's own result gets dropped later, and each branch computed it from
+  self-contained state (`example_final`, `example_valid`, `example_qif_reversal`).
+- function calls, first version: a callee's body is resolved inline, the same way a qif branch
+  resolves into its own statements. `renames` translates the callee's parameter names back to
+  whatever the caller passed; `planCallCopies` inserts a copy ahead of a call when a later
+  reversal needs to reuse a reference the call would otherwise consume. Composition across
+  nested calls is recursive by construction (`example_nested_call_reversal` confirms it two
+  levels deep).
 
-**`qif`, first version:** only the case where a qif expression's own *result* gets dropped later, and each branch computed that result out of its own self-contained state (see `example_final.qurts-core`, `example_valid.qurts-core`, `example_qif_reversal.qurts-core`). `FromQIf` in `Uncompute.hs` records the control variable plus each branch's own already-resolved return `Origin`; reversing it re-runs a qif on the *same* control, with each branch independently reversing its own origin starting from the value being dropped (its original local variable no longer exists in the rewritten program at all). Two supporting fixes this needed, both general rather than qif-specific:
-  - `hasLaterEndlft`: a reversed value is normally left for `checkBlock`'s implicit end-of-scope cleanup (as above), but if a later `endlft` intervenes first, that's unsound for a lifetime-typed value — so an explicit trailing `drop` is inserted right away instead. Found by re-type-checking `example_final.qurts-core`'s first attempt at output.
-  - `collectDeferredBorrows`: a qif's control variable is reused by its own later reversal, so its *original* `drop` in the source must be suppressed rather than processed normally (`hasLaterEndlft` would otherwise drop it too early) — and then explicitly dropped for real right after that reuse, since `endlft`'s own rule (`noRefInCtx`, `TypeChecker.hs`) requires *zero* live references to its lifetime in context, stricter than ordinary droppability. Found by re-type-checking `example_valid.qurts-core`, where the source drops the control *before* the value whose reversal needs it.
+Not handled:
 
-**Function calls, first version:** `resolveExpr`'s `ECall` case resolves *into* the callee's own body — folding its statements into a `DefMap` seeded with its own parameters (each mapped to the already-resolved `Origin` of the matching actual argument), then resolving its own return var — exactly the way a qif branch resolves into its own statements, just across a function boundary instead. A resolved call is fully transparent (no `Origin` wrapper): it becomes whatever `FromGate`/`FromClassicalGate`/`FromQIf`/... chain the callee's own return value already resolves to, so nothing in the *reversal*-generation side (`reverseOrigin`) needed to change at all — the whole feature lives in the resolution side. Two mechanisms make this sound (see `example_grover.qurts-core`, the first example this unlocked — `non_zero`/`oracle`, called from `grover_diffusion`/`grover`, each have their own internal qif controlled by their own reference parameters):
-  - **`renames`** (`Map Var Var`, threaded alongside `DefMap`): translates a callee's own parameter name to whatever the caller actually passed, composing correctly across nested calls, so a `FromQIf`'s `ctrl` field — which is embedded as a literal name into reconstructed code, unlike everything else which is chased by `Origin` alone — ends up naming something that actually exists in the caller's scope, not the callee's own (never re-executed) internal name.
-  - **`planCallCopies`**: a call consumes *every* argument outright, including references (`TypeChecker.hs`'s `checkExpr(ECall...)` calls `removeVar` on each one unconditionally — unlike `qif`, which explicitly restores its own control afterward). So if a later drop's reversal needs to reuse a reference that was passed into a qif-using callee, that reference is simply gone by the consuming call. Confirmed empirically (calling a function twice with the same reference fails; re-borrowing the underlying qubit doesn't work either, since it's `Frozen` until `endlft`) — but `copy`ing the reference *before* the call does work (references are Copy, and copying doesn't consume the original). Since knowing which arguments actually need this requires the same kind of look-ahead `collectDeferredBorrows` itself needs, `uncomputeStmts` runs it twice per function: once with no copies, purely to discover what's needed, then for real with the resulting copies spliced in front of the relevant calls.
-  - A third fix, general rather than call-specific, was needed alongside these: `outermostQifCtrl` vs. `qifControlsIn`. In a chain of nested reconstructed qifs (e.g. `non_zero`'s x/y/z, each nested one level inside the previous one's branch), only the *outermost* control ends up needing (or able to validly receive) an explicit trailing `drop` — a deeper one is already implicitly swallowed by the cascading per-branch cleanup `checkBlock` does at each nesting level (each branch drops any other still-active variable it doesn't itself consume, including a deeper qif's own just-restored control). Found by re-type-checking `example_grover.qurts-core`'s first attempt at output (`UnboundVariable` on the inner controls, already gone by the time their own explicit `drop` ran).
+- A `drop` inside a qif branch (`example_reinitialise`).
+- A qif branch (or callee) whose result depends on a reference created *locally* — inside that
+  branch or callee — rather than reused from outer scope (`example_grover_amplified`'s `oracle`,
+  `example_self_controlled_uncomp`). "Just regenerate the local setup" doesn't work:
+  `typ_qif`'s rule ties the reconstructed result's type to the control's own lifetime. A fresh
+  lifetime for the regenerated borrow traps the result in local scope; reusing the existing
+  outer lifetime leaves the regenerated qubit frozen with no way to reverse it early. This needs
+  the paper's split/merge pebble-game machinery (Section 5.1), not a statement-level rewrite.
+- Reversing a value whose branches aren't self-contained, or one half of a jointly-computed pair
+  while its sibling is still live (`example_cnot_reinit`).
 
-  `renames`/`rcCopies` composition is recursive by construction (the same `resolveExpr` code path runs again at each further call, with no special-casing for depth), but was only empirically exercised one call level deep until `example_nested_call_reversal.qurts-core` — a chain of three functions, the innermost's own `qif` controlled by a parameter two call boundaries away from its only real, top-level name — confirmed the composition (and gate application on either side of the call chain) is correct two levels deep, not just designed to be.
-
-Not covered, and not attempted by this first version:
-- A `drop` occurring *inside* a qif branch (`example_reinitialise.qurts-core`).
-- A branch whose own return value was produced by a *further* qif controlled by a reference created *inside that same branch* (as opposed to reused from outer scope, or a callee's own parameter — both of which do work). The reconstruction only ever chases gates on the value being dropped; it never regenerates a branch's (or callee's) own local setup statements, so a reference bound purely within that branch — or, the function-call-shaped sibling of the same gap, a reference a *callee* creates itself and passes into a *further* nested call (`example_grover_amplified.qurts-core`'s `oracle`, which routes through `clause_or2`/`clause_nand2`/`clause_unit` and its own `let rc1 = &alpha c1 ; ... ; all_satisfied3<alpha>(rc1, rc2, rc3)` — unlike `example_grover.qurts-core`'s simpler `oracle`, whose qifs are controlled directly by its own parameters) — has nothing to attach to once the reversal is emitted as a new, disconnected statement.
-
-  A "just regenerate it" fix was considered and doesn't work: `typ_qif`'s own rule ties the reconstructed value's type to the *control's* lifetime, not the input's (result is always `#α τ`, `α` the control's own lifetime). Reborrowing the regenerated qubit under a *fresh, local* lifetime (so it can be `endlft`'d to un-freeze and reverse afterward) traps the qif's own result in that same local scope — it can never survive to be the drop's overall replacement, which needs to persist until the function's *existing, outer* `endlft`, exactly like `argcopy0`'s result already does. Reusing the *existing* outer lifetime instead (so the result does survive) leaves the regenerated qubit itself frozen under it for the rest of the function, with no way to `endlft` just that one borrow early enough to reverse it back to `|0⟩` — it would rely on implicit cleanup with no guarantee of actually being `|0⟩` by then, exactly the physically-invalid discard this pass exists to prevent. Both options break something load-bearing; this is the same fundamental tension the paper's own guard/pebble system (Section 5.1) exists to resolve properly, by tracking fragmented, lifetime-scoped pebbles rather than plain statement-level rewriting — not a corner case fixable in isolation.
-- Reversing a value whose branches aren't self-contained — where a branch's computation is entangled with something the *other* branch or the control reference itself also depends on (Kengo's example: `let (x,y) = [cnot](x,y) ; let y2 = qif &b x { y } else { drop y ; [0]() }` — reversing `y` alone can't "put back" a value only meaningful reversed together with `x`, since `[cnot]` produced both jointly).
-- Reversing one half of a jointly-computed pair while its sibling is still live (e.g. `[cnot](p)` then dropping only one of its two destructured outputs — `example_cnot_reinit.qurts-core`).
-
-The last two need the paper's full split/merge pebble-game machinery (Section 5.1) — a shared circuit graph tracked across branches/pair-halves and their control's own history, not the per-branch/per-chain-in-isolation `Origin` values this pass uses everywhere else. See `example_self_controlled_uncomp.qurts-core`.
-
-`Origin` resolves eagerly — at the point each binding is recorded, not by looking a name up again later — and `freshVar`/`freshNamed` avoid every name already bound anywhere in the function. Both are load-bearing for correctness, not just style: qurts-core frees a name for reuse once it's consumed (`EVar`/`EU`/`EC` all call `removeVar`), so a lazy, name-keyed lookup or an unchecked fresh-name counter can silently produce wrong output on programs that rebind a name or already use a `revN`/`argcopyN`-shaped name.
-
-## Not built yet
-
-- **qif and function calls, the shared/jointly-computed-dependency case** — needs the paper's split/merge pebble-game rule; a separate, substantial piece of the algorithm on top of the first versions above. Covers drops nested inside qif branches, a reference a branch or callee creates and passes to a further nested qif/call, and reversing one half of a jointly-computed pair (see above).
-
-This is why the remaining 5 of 22 examples stay `SKIP`.
-
-
-# PROBLEM  QIF (dont delete this)
-The problem: typ_qif's own rule (the same one I quoted from the paper earlier) ties the reconstructed value's type to the control's lifetime, not the input's: the result is always #α τ where α is the control's own lifetime. This has a consequence I didn't work through before:
-
-If freshCtrl (the regenerated borrow) uses a fresh, local lifetime (so I can endlft it afterward and un-freeze the regenerated qubit to reverse it) — then the qif's own result is trapped in that same fresh, local scope too. It can never be the thing that survives to become the drop's overall replacement, because that needs to persist until the existing, outer endlft alpha1 — exactly like argcopy0's reconstructed result does today. A value tagged with an already-ended lifetime isn't droppable (canDrop needs the lifetime active) — it'd be stuck.
-If freshCtrl instead reuses the existing, translated alpha1 (matching how argcopy0 already works, so the result correctly survives) — then the regenerated underlying qubit stays frozen under alpha1 for the rest of the function, same as any other borrow. There's no way to endlft just that one borrow early to un-freeze it and reverse it back to |0⟩ — alpha1 is still needed for everything else. So the regenerated qubit would be stuck as leftover state, relying on implicit cleanup at the very end of the function — with no guarantee it's actually |0⟩ at that point. That's exactly the physically-invalid discard this whole pass exists to prevent.
-Both options break something load-bearing. This isn't a corner case I can special-case around — it's the same fundamental tension the paper's own guard/pebble system (Section 5.1) exists to resolve properly, by tracking fragmented, lifetime-scoped pebbles rather than plain statement-level rewriting.
-problem with grovers not amplifiying anything: double Z
-Fix the example — rewrite grover's phase application so the kickback survives uncomputation (and check whether grover_amplified shares the issue). This is the "make grover actually work" path.
-Or treat it as an uncompute-pass question — should the pass recognize that a phase gate on a to-be-dropped ancilla shouldn't be reversed? (This edges toward the pebble-game territory we deferred.)
+Both of the last two need the same pebble-game machinery — a shared circuit graph tracked across
+branches/pairs, not the per-chain `Origin` values this pass uses everywhere else. This is why 5
+of 23 examples stay `SKIP`.

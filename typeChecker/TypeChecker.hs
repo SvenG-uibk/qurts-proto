@@ -1,6 +1,7 @@
 module TypeChecker where
 
 import Ast
+import GateInverse                (isKnownClassicalInjection)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set        as Set
 import Control.Monad             (unless, when, forM_)
@@ -447,7 +448,26 @@ checkExpr (EU _u x) = do
 -- single qubit: consumes x : #𝔞 qbit, returns #𝔞 qbit
 -- pair of qubits: consumes x : (#𝔞 qbit × #𝔞 qbit), returns (#𝔞 qbit × #𝔞 qbit)
 --   (both qubits must share the same lifetime 𝔞, matching the paper's #𝔞 qbit²)
-checkExpr (EC _c x) = do
+--
+-- Unlike EU, [c] is only ever meant for "the lift of a classical Boolean
+-- injective function" (Section 3.2.1) -- a genuine permutation of
+-- computational-basis kets, no phase, which is exactly why it gets to keep
+-- its lifetime tag (preserving droppability) where EU pins to #bot instead.
+-- That's a semantic promise about what `c` denotes, not just a syntactic
+-- shape -- so it has to be checked here, not left to whatever gate names
+-- GateInverse.hs's table happens to contain. Without this check, `[H](x)`
+-- (H is not a classical injection -- it mixes basis states) type-checked
+-- exactly like `[X](x)`, preserving droppability for a gate the language
+-- explicitly does not promise that for; it was only ever caught by accident,
+-- downstream, if Uncompute.hs's own lookup table happened not to recognise
+-- the name.
+checkExpr (EC c x) = do
+  unless (isKnownClassicalInjection c) $
+    throwError (OtherError ("not a known classical injection for [c](x): " ++ show c
+      ++ " -- only names registered in GateInverse.hs's classicalInverseTable "
+      ++ "(a genuine lift of a classical Boolean injective function, no phase) "
+      ++ "are valid here; use U(x) (EU) for a general unitary, which forfeits "
+      ++ "the argument's droppability instead of falsely promising it"))
   ty <- lookupActiveVar x
   case ty of
     TyBang a TyQBit -> do
@@ -497,10 +517,21 @@ checkExpr (ECall fname lts args) = do
 -- expr_classical_if: if x Bt else Bf
 -- x : bool, both branches return same type T
 -- Context consistency is enforced by checkBlock: each branch must consume all of Γ.
+-- The paper's own expr_measure/expr_const_bool rules type every bool-producing
+-- expression (meas(x), true, false) as #⊤bool, never bare bool, and Figure 13's
+-- subtyping has no rule collapsing #𝔞bool to bool -- so a literal-TyBool match
+-- here would make expr_classical_if only ever satisfiable by a bare `bool`
+-- function parameter, never by a measured or literal condition. Since bool is
+-- unconditionally Copy (cpy_bool) regardless of its ownership wrapper (cpy_own
+-- adds no restriction #𝔞bool doesn't already have), stripping the wrapper here
+-- is a conservative reading of the intended rule, not a soundness-affecting
+-- extension: no linear resource is hidden inside a bool's #𝔞 annotation.
 checkExpr (EIf x bt bf) = do
   ty <- lookupActiveVar x
-  case ty of
+  case stripBang ty of
     TyBool -> do
+      -- x ∈ Δ: remove x so branches are typed under Γ alone (mirrors
+      -- expr_quantum_if's identical Γ+Δ split -- see checkExpr EQIf above)
       removeVar x
       ctxBefore  <- getCtx
       lftsBefore <- getLfts
@@ -508,6 +539,9 @@ checkExpr (EIf x bt bf) = do
       putCtx  ctxBefore
       putLfts lftsBefore
       t2 <- checkBlock bf
+      -- restore x: bool back into context (stays in Δ after the
+      -- expression, same as qif restores its own control variable)
+      insertVar x ty
       unless (t1 == t2) $ throwError (TypeMismatch t1 t2)
       return t1
     _ -> throwError (TypeMismatch TyBool ty)

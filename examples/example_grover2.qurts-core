@@ -1,0 +1,111 @@
+fn kickback_and < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit , anc : # bot qbit) -> # alpha qbit {
+    let anc = qif x {
+        let anc2 = qif y {
+            let anc3 = qif z {
+                let anc4 = [X](anc) ;
+                anc4
+            } else {
+                noop ;
+                anc
+            } ;
+            anc3
+        } else {
+            noop ;
+            anc
+        } ;
+        anc2
+    } else {
+        noop ;
+        anc
+    } ;
+    anc
+} ;
+
+fn kickback_all_zero < alpha | > (x : & alpha # bot qbit , y : & alpha # bot qbit , z : & alpha # bot qbit , anc : # bot qbit) -> # alpha qbit {
+    let anc = qif x {
+        noop ;
+        anc
+    } else {
+        let anc2 = qif y {
+            noop ;
+            anc
+        } else {
+            let anc3 = qif z {
+                noop ;
+                anc
+            } else {
+                let anc4 = [X](anc) ;
+                anc4
+            } ;
+            anc3
+        } ;
+        anc2
+    } ;
+    anc
+} ;
+
+fn grover_diffusion < | > (x : # bot qbit , y : # bot qbit , z : # bot qbit , anc : # bot qbit) -> # bot qbit * # bot qbit * # bot qbit * # bot qbit {
+    let x = H(x) ;
+    let y = H(y) ;
+    let z = H(z) ;
+    newlft beta ;
+    let rx = &beta x ;
+    let ry = &beta y ;
+    let rz = &beta z ;
+    let anc = kickback_all_zero<beta>(rx, ry, rz, anc) ;
+    endlft beta ;
+    anc as # bot qbit ;
+    let x = H(x) ;
+    let y = H(y) ;
+    let z = H(z) ;
+    let xy = (x, y) ;
+    let xyz = (xy, z) ;
+    let xyza = (xyz, anc) ;
+    xyza
+} ;
+
+fn grover < | > (x : # bot qbit , y : # bot qbit , z : # bot qbit) -> # top bool * # top bool * # top bool {
+    let anc = [1]() ;
+    anc as # bot qbit ;
+    let anc = H(anc) ;
+
+    let x = H(x) ;
+    let y = H(y) ;
+    let z = H(z) ;
+
+    newlft alpha1 ;
+    let rx1 = &alpha1 x ;
+    let ry1 = &alpha1 y ;
+    let rz1 = &alpha1 z ;
+    let anc = kickback_and<alpha1>(rx1, ry1, rz1, anc) ;
+    endlft alpha1 ;
+    anc as # bot qbit ;
+
+    let step1 = grover_diffusion<>(x, y, z, anc) ;
+    let (xyz1, anc) = step1 ;
+    let (xy1, z) = xyz1 ;
+    let (x, y) = xy1 ;
+
+    newlft alpha2 ;
+    let rx2 = &alpha2 x ;
+    let ry2 = &alpha2 y ;
+    let rz2 = &alpha2 z ;
+    let anc = kickback_and<alpha2>(rx2, ry2, rz2, anc) ;
+    endlft alpha2 ;
+    anc as # bot qbit ;
+
+    let step2 = grover_diffusion<>(x, y, z, anc) ;
+    let (xyz2, anc) = step2 ;
+    let (xy2, z) = xyz2 ;
+    let (x, y) = xy2 ;
+
+    let discardanc = meas(anc) ;
+    drop discardanc ;
+
+    let bx = meas(x) ;
+    let by = meas(y) ;
+    let bz = meas(z) ;
+    let bxy = (bx, by) ;
+    let bxyz = (bxy, bz) ;
+    bxyz
+}

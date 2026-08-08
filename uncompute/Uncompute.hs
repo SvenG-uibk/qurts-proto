@@ -9,10 +9,10 @@
 -- construction, qif expressions whose *result* is what's being dropped
 -- (see FromQIf), and calls to functions whose own bodies are themselves
 -- built out of exactly this same list (see resolveExpr's ECall case) --
--- terminating in [0]()/[1](). [1]() needs an inserted [not] flip (via EC,
+-- terminating in [0]()/[1](). [1]() needs an inserted [X] flip (via EC,
 -- not EU -- see the FromInit1 case below for why) to actually reach |0>
 -- before the point where the `drop` used to be. EC (classical injections
--- like [not]/[cnot]/[swap]/[Z]) is only reversible for names in
+-- like [X]/[cnot]/[swap]) is only reversible for names in
 -- GateInverse.hs's classicalInverseTable, and only when what it's chained
 -- through is a single already-tracked value, not a pair whose two halves
 -- have been separately destructured (that needs the paper's split/merge
@@ -68,7 +68,7 @@ import Data.Text (pack)
 -- happens to variable names afterward.
 data Origin
   = FromInit0                    -- [0](): already |0>, nothing to undo
-  | FromInit1                    -- [1](): needs a [not] flip before it's safe to drop
+  | FromInit1                    -- [1](): needs a [X] flip before it's safe to drop
   | FromTrivial                  -- true/false/()/copy/meas(_): Drop-trait, always droppable regardless of history
   | FromBorrow                   -- &a x: always droppable, no gate produced it
   | FromGate Unitary Origin      -- EU u prev, prev already resolved
@@ -383,7 +383,7 @@ reverseOrigin _ n FromInit0 currentVar = Right ([], currentVar, n)
 -- -- treating this as a no-op (as an earlier version of this pass did) was a
 -- real bug: dropping a never-flipped |1> qubit is exactly the physically
 -- invalid discard this whole pass exists to prevent. The flip must be
--- inserted via EC's `[not]`, not EU's bare gate syntax: EU is pinned to
+-- inserted via EC's `[X]`, not EU's bare gate syntax: EU is pinned to
 -- operating on/producing exactly #bot qbit (see expr_unitary in
 -- TypeChecker.hs), and #bot can never be widened back to a droppable type --
 -- confirmed empirically, `x as #bot qbit ; let y = H(x) ; y as #top qbit`
@@ -392,7 +392,7 @@ reverseOrigin _ n FromInit0 currentVar = Right ([], currentVar, n)
 -- whatever (already-droppable) lifetime currentVar already has.
 reverseOrigin reserved n FromInit1 currentVar =
   let (fresh, n') = freshVar reserved n
-      step        = SLetExpr fresh (EC (Classical (pack "not")) currentVar)
+      step        = SLetExpr fresh (EC (Classical (pack "X")) currentVar)
   in Right ([step], fresh, n')
 -- Always-droppable results (Fig. 6's Drop trait: bool, unit, and anything
 -- Copy -- which in this system means references, since only Copy-eligible
@@ -406,6 +406,15 @@ reverseOrigin _ n FromBorrow  currentVar = Right ([], currentVar, n)
 -- program -- a borrow is &-typed, never #-typed, so it could never have
 -- been EU's argument in the first place -- so it's fine that this just
 -- falls through to FromBorrow's own no-op case rather than asserting.)
+--
+-- No gate is ever skipped here, diagonal or not -- see GateInverse.hs's
+-- module-level note for why the previous diagonal-skip shortcut (isDiagonalUnitary
+-- / isDiagonalClassical) was removed: it's unsound in general, not just
+-- unnecessary. Full reversal -- apply each gate's own exact inverse, in
+-- exact reverse order, every time -- is what Qurts's uncomputation-semantics
+-- theorem (Thm 5.4) actually establishes as correct; there is no theorem
+-- (in Qurts or in Unqomp, which this pass's approach is modelled on)
+-- licensing a shortcut based on a gate's name being diagonal.
 reverseOrigin reserved n (FromGate u prev) currentVar = do
   invU <- note ("no known inverse for unitary gate " ++ show u) (unitaryInverse u)
   let (fresh, n') = freshVar reserved n
@@ -424,6 +433,25 @@ reverseOrigin reserved n (FromGate u prev) currentVar = do
 -- sibling is still live -- never reaches here: recordBinding's SLetPair
 -- case only unwraps a bare FromPair, not a FromClassicalGate-wrapped one,
 -- so a destructured half stays FromUnbound and fails at the lookup instead.
+--
+-- No gate is skipped here either, same reasoning as FromGate above. See
+-- GateInverse.hs's module note: the former diagonal-skip shortcut assumed a
+-- diagonal gate can never need reversing because it "only multiplies a
+-- branch's own amplitude by a phase" -- true in isolation, but that argument
+-- silently assumed the value was already confined to a single computational-
+-- basis ket at the point the diagonal gate was applied. Nothing in Qurts's
+-- type system guarantees that: a qif's own typing rule (typ_qif) retypes a
+-- branch's return value to #alpha T regardless of what bang-tag that branch
+-- actually produced -- including #bot, from an EU-dispatched *non*-diagonal
+-- gate earlier in that same branch's own local history. So a diagonal gate
+-- can end up applied to a value that is genuinely, locally superposed, not
+-- just phase-tagged per branch -- and skipping its reversal there silently
+-- entangles the dropped value with whatever it was branching on instead of
+-- returning it to |0>. (Confirmed by direct construction: `H` then `Z`,
+-- both bare EU, inside one branch of a qif whose other branch is untouched,
+-- typechecks, and the compiled circuit's two branches disagree on the
+-- qubit's final value after the old skip-based reversal -- exactly the
+-- invalid, non-disentangling drop Definition 2.1 forbids.)
 reverseOrigin reserved n (FromClassicalGate c prev) currentVar = do
   invC <- note ("no known inverse for classical injection " ++ show c) (classicalInverse c)
   let (fresh, n') = freshVar reserved n
@@ -747,7 +775,7 @@ nestedDropReason _ =
 -- variables ... are implicitly dropped at end of scope" comment) -- so an
 -- explicit trailing SDrop here would usually be redundant, not required.
 -- Confirmed empirically: a hand-edited version of example_pair.qurts-core
--- with the trailing `drop` removed after the inserted `[not]` still
+-- with the trailing `drop` removed after the inserted `[X]` still
 -- type-checks. The one exception is when a later `endlft` intervenes
 -- before the block actually ends -- see hasLaterEndlft -- in which case an
 -- explicit drop *is* emitted, right away, rather than relying on

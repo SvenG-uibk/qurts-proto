@@ -1,6 +1,6 @@
 fn my_cnot < alpha | > (x : & alpha qbit , y : # alpha qbit) -> # alpha qbit {
     let result = qif x {
-        let r = [not](y) ;
+        let r = [X](y) ;
         r
     } else {
         noop ;

@@ -6,12 +6,15 @@
 -- or literal pairs, renames, &borrows, meas, pairs and their destructure,
 -- the no-op statements (drop/as/newlft/endlft/noop), entry parameters, qif
 -- (-> controlled gates), classical if on a statically-known condition
--- (-> static branch selection), and function call inlining. What's left
--- (classical if on a dynamic/measured condition, and anything the
--- uncomputation pass itself can't handle) is left to fail loudly (Left)
--- rather than silently miscompile -- a wrong circuit has no type checker to
--- catch it downstream, so every unhandled construct must announce itself.
--- See circuit/README.md's "Current coverage" for the exact boundary.
+-- (-> static branch selection), classical if on a dynamic/measured
+-- condition (-> classically-conditioned gates, Qiskit if_test -- restricted
+-- to the same RFresh/RInput branch shape as qif), and function call
+-- inlining. What's left (anything the uncomputation pass itself can't
+-- handle, or a qif/classical-if branch outside that restricted shape) is
+-- left to fail loudly (Left) rather than silently miscompile -- a wrong
+-- circuit has no type checker to catch it downstream, so every unhandled
+-- construct must announce itself. See circuit/README.md's "Current
+-- coverage" for the exact boundary.
 --
 -- Locations. Following the paper's own model (Fig. 10), every variable maps
 -- to a set of physical qubit *locations*, structured as a LocTree so a pair
@@ -61,13 +64,24 @@ leaves LUnit       = []
 -- | One flat circuit instruction. Controls (from enclosing qifs) ride on
 -- each gate directly, as (qubit, polarity) pairs -- polarity True = the
 -- ordinary positive control (|1>), False = negative control (|0>, the else
--- branch). Allocation and measurement are never controlled (an init inside
--- a qif is hoisted out; meas can't occur under qif at all, per the Purely
--- Quantum restriction), so they carry no control list.
+-- branch). A gate also carries classical conditions (from an enclosing
+-- classical `if` on a *dynamic*, measured condition) as (classical-bit,
+-- polarity) pairs -- Qiskit realises these as if_test rather than a qubit
+-- control, since only one branch's gates ever actually execute. The two
+-- kinds never mix in practice: classical if is not Purely Quantum, so it
+-- can never appear inside a qif branch (the type checker rejects that),
+-- meaning a gate's quantum controls and classical conditions never both
+-- come from mutually-nested qif/if -- but both fields exist independently
+-- so either can nest arbitrarily deep on its own (a classical if inside
+-- another classical if's branch accumulates classical conditions the same
+-- way a nested qif accumulates quantum controls). Allocation and
+-- measurement are never conditioned (an init inside a branch is hoisted
+-- out; meas can't occur under qif at all, per the Purely Quantum
+-- restriction), so they carry no control list.
 data CInstr
-  = IAlloc Int Bool                 -- qubit index, init to |1>?
-  | IGate Text [Int] [(Int, Bool)]  -- gate name, target qubits, controls
-  | IMeas Int Int                   -- qubit index, classical-bit index
+  = IAlloc Int Bool                             -- qubit index, init to |1>?
+  | IGate Text [Int] [(Int, Bool)] [(Int, Bool)] -- gate name, targets, quantum controls, classical conditions
+  | IMeas Int Int                               -- qubit index, classical-bit index
   deriving (Show)
 
 -- | A whole compiled circuit: how many qubits/cbits it needs, the
@@ -107,6 +121,42 @@ allocCbit st =
 
 emit :: CInstr -> CState -> CState
 emit i st = st { csInstrs = i : csInstrs st }
+
+-- | Collapse a (qubit-or-cbit index, required polarity) list down to one
+-- entry per index, or report it as never-satisfiable. Needed because two
+-- *different* qurts-core variables can alias the very same physical index
+-- -- e.g. two reference parameters both `copy`d from the same borrowed
+-- qubit (example_copy_alias.qurts-core's `toffoli(y, z, w)`, where `y` and
+-- `z` both alias `x`) -- and compileQifCore's own `ctrls ++ [(ctrlLoc,
+-- polarity)]` accumulation has no way to notice that at the point it
+-- builds the list. Two entries for the same index and the same polarity are
+-- redundant ("q=1 and q=1" is just "q=1"); two for the same index with
+-- opposite polarities are a contradiction ("q=1 and q=0") that can never be
+-- satisfied, so whatever gate they'd guard can never fire. Either way,
+-- passing the raw list straight through would ask Qiskit's own
+-- `.control()`/`.append()` to reference the same qubit twice in one
+-- instruction, which it rejects outright (CircuitError: duplicate qubit
+-- arguments) -- confirmed empirically against example_copy_alias.qurts-core.
+normalizeCtrls :: [(Int, Bool)] -> Maybe [(Int, Bool)]
+normalizeCtrls = fmap Map.toList . go Map.empty
+  where
+    go acc []             = Just acc
+    go acc ((i, p) : rest) = case Map.lookup i acc of
+      Nothing               -> go (Map.insert i p acc) rest
+      Just p' | p == p'     -> go acc rest
+              | otherwise   -> Nothing
+
+-- | Emit a gate after normalizing its quantum controls and classical
+-- conditions (see normalizeCtrls) -- silently emits nothing at all if
+-- either list turns out self-contradictory, since such a gate can never
+-- fire regardless of what it would have done. The caller still binds its
+-- result variable to whatever location it would have occupied either way
+-- (unaffected by whether a physical gate was actually needed to get there).
+emitGate :: Text -> [Int] -> [(Int, Bool)] -> [(Int, Bool)] -> CState -> CState
+emitGate name targets ctrls cctrls st =
+  case (normalizeCtrls ctrls, normalizeCtrls cctrls) of
+    (Just ctrls', Just cctrls') -> emit (IGate name targets ctrls' cctrls') st
+    _                           -> st
 
 bind :: Var -> LocTree -> CState -> CState
 bind v t st = st { csEnv = Map.insert v t (csEnv st) }
@@ -168,12 +218,12 @@ compileExpr ctrls st y e = case e of
   EU (Unitary name) x -> do
     qs <- lookupLeaves st x
     case qs of
-      [q] -> Right (bind y (LLeaf q) (emit (IGate name [q] ctrls) st))
+      [q] -> Right (bind y (LLeaf q) (emitGate name [q] ctrls [] st))
       _   -> Left ("circuit: unitary " ++ unpack name ++ " expects a single qubit")
   EC (Classical name) x -> do      -- lifted injection: 1- or 2-qubit, on the arg's leaves
     t  <- lookupTree st x
     let qs = leaves t
-    Right (bind y t (emit (IGate name qs ctrls) st))
+    Right (bind y t (emitGate name qs ctrls [] st))
   EPair a b -> do
     ta <- lookupTree st a
     tb <- lookupTree st b
@@ -184,7 +234,7 @@ compileExpr ctrls st y e = case e of
     case t of
       LBool True  -> compileIfBranch ctrls st y bt
       LBool False -> compileIfBranch ctrls st y bf
-      LBit _      -> Left "circuit: classical if on a dynamic (measured) condition not handled yet"
+      LBit c      -> compileIfDynamic c st y bt bf
       _           -> Left ("circuit: classical if expects a bool, got " ++ show t)
   ECall fname _ args -> compileCall ctrls st y fname args
 
@@ -227,7 +277,7 @@ compileCall ctrls st y fname args =
 
 -- | How a qif branch produces its (single-qubit) return value: either by
 -- threading a pre-existing outer variable through in place (RInput,
--- possibly gated -- the my_cnot `[not](q)` / `noop; q` shape), or by
+-- possibly gated -- the my_cnot `[X](q)` / `noop; q` shape), or by
 -- building a brand-new qubit (RFresh -- the `let z=[1](); z` shape). Both
 -- branches of one qif must agree on which; a mismatch (or anything more
 -- structured -- a nested qif, pair, call, or meas in the branch) is left
@@ -362,13 +412,13 @@ compileBranchStmt ctrls rTree st stmt = case stmt of
   SLetRef y _ x -> do t <- lookupTree st x; Right (bind y t st)
   SLetExpr y EInit0 -> Right (bind y rTree st)               -- redirect fresh init to shared |0>
   SLetExpr y EInit1 ->                                        -- ... and a [1] is a controlled X onto it
-    Right (bind y rTree (emit (IGate (packX) (leaves rTree) ctrls) st))
+    Right (bind y rTree (emitGate packX (leaves rTree) ctrls [] st))
   SLetExpr y (EU (Unitary name) x) -> do
     q <- singleLeaf st x
-    Right (bind y (LLeaf q) (emit (IGate name [q] ctrls) st))
+    Right (bind y (LLeaf q) (emitGate name [q] ctrls [] st))
   SLetExpr y (EC (Classical name) x) -> do
     t <- lookupTree st x
-    Right (bind y t (emit (IGate name (leaves t) ctrls) st))
+    Right (bind y t (emitGate name (leaves t) ctrls [] st))
   SLetExpr y (EVar x)  -> do t <- lookupTree st x; Right (bind y t st)
   SLetExpr y (ECopy x) -> do t <- lookupTree st x; Right (bind y t st)
   -- A nested qif whose result is this branch's own contribution: build it
@@ -386,6 +436,79 @@ compileBranchStmt ctrls rTree st stmt = case stmt of
 -- controlled bit-flip on the shared result location.
 packX :: Text
 packX = pack "X"
+
+-- | Compile `let y = if ctrl { Bt } else { Bf }` where ctrl is a *dynamic*
+-- (measured) bool, resolved by the EIf case above to its classical-bit
+-- index `c`. Unlike qif, only one branch's gates ever actually run --
+-- decided at circuit run time by the measured bit, not by superposition --
+-- so Qiskit expresses that as a classical condition on the gate itself
+-- (if_test) rather than an extra qubit control. Everything else mirrors
+-- compileQifCore: both branches must classify as RFresh (build one shared
+-- fresh qubit) or the same RInput (thread one shared existing qubit) --
+-- see classifyReturn -- and are compiled onto that one location, positive
+-- condition (bit=1) for the then-branch, negative (bit=0) for the else.
+-- Classical if is never Purely Quantum, so it can never itself be nested
+-- inside a qif branch (the type checker rejects that) -- there is no
+-- quantum-controls list to combine with the classical condition here.
+compileIfDynamic :: Int -> CState -> Var -> Block -> Block -> Either String CState
+compileIfDynamic c st y bt bf = do
+  let env0 = csEnv st
+  (rTree, st1) <- case (classifyReturn bt, classifyReturn bf) of
+    (RInput a, RInput b) -> do
+      la <- singleLeaf st a
+      lb <- singleLeaf st b
+      if la == lb
+        then Right (LLeaf la, st)
+        else Left "circuit: classical if branches thread different locations, not handled yet"
+    (RFresh, RFresh) ->
+      let (q, st') = allocQubit False st in Right (LLeaf q, st')
+    (kt, kf) -> Left ("circuit: classical if branches with return kinds "
+                       ++ show kt ++ "/" ++ show kf ++ " not handled yet")
+  st2 <- compileCondBranchOnto [(c, True)]  rTree st1 bt
+  let st2' = st2 { csEnv = env0 }
+  st3 <- compileCondBranchOnto [(c, False)] rTree st2' bf
+  Right (bind y rTree (st3 { csEnv = env0 }))
+
+-- | Like compileBranchOnto, but every gate is classically conditioned
+-- (Qiskit if_test on the measured bit) instead of quantum-controlled --
+-- see compileCondBranchStmt. Supports the same restricted branch shape as
+-- qif's compileBranchOnto (EInit0/1, EU, EC, EVar, ECopy).
+compileCondBranchOnto :: [(Int, Bool)] -> LocTree -> CState -> Block
+                      -> Either String CState
+compileCondBranchOnto ccond rTree st (Block stmt ret) = do
+  st' <- go st (flattenStmt stmt)
+  tret <- lookupTree st' ret
+  if leaves tret == leaves rTree
+    then Right st'
+    else Left "circuit: classical if branch return did not land on the shared result location"
+  where
+    go s []       = Right s
+    go s (x : xs) = compileCondBranchStmt ccond rTree s x >>= \s' -> go s' xs
+
+compileCondBranchStmt :: [(Int, Bool)] -> LocTree -> CState -> Stmt
+                      -> Either String CState
+compileCondBranchStmt ccond rTree st stmt = case stmt of
+  SNoop        -> Right st
+  SSeq s1 s2   -> compileCondBranchStmt ccond rTree st s1
+                    >>= \st' -> compileCondBranchStmt ccond rTree st' s2
+  SNewLft _    -> Right st
+  SEndLft _    -> Right st
+  SLeq _ _     -> Right st
+  SAs _ _      -> Right st
+  SDrop _      -> Right st
+  SLetRef y _ x -> do t <- lookupTree st x; Right (bind y t st)
+  SLetExpr y EInit0 -> Right (bind y rTree st)               -- redirect fresh init to shared |0>
+  SLetExpr y EInit1 ->                                        -- ... and a [1] is a classically-conditioned X onto it
+    Right (bind y rTree (emitGate packX (leaves rTree) [] ccond st))
+  SLetExpr y (EU (Unitary name) x) -> do
+    q <- singleLeaf st x
+    Right (bind y (LLeaf q) (emitGate name [q] [] ccond st))
+  SLetExpr y (EC (Classical name) x) -> do
+    t <- lookupTree st x
+    Right (bind y t (emitGate name (leaves t) [] ccond st))
+  SLetExpr y (EVar x)  -> do t <- lookupTree st x; Right (bind y t st)
+  SLetExpr y (ECopy x) -> do t <- lookupTree st x; Right (bind y t st)
+  _ -> Left "circuit: unsupported statement inside a classical-if branch (nested qif/if, pair/call/meas not compiled yet)"
 
 -- | Allocate fresh qubits for a type, mirroring its structure into a
 -- LocTree: a qubit is one leaf, a pair is a node, ownership (#a) and
@@ -408,9 +531,10 @@ allocForType TyUnit        st = (LUnit, st)
 -- | Compile a whole program to a circuit, using its LAST function as the
 -- entry point (grover, example_ec_reversal, ... are all written last in
 -- their files). Each of the entry's parameters gets fresh |0> qubits
--- matching its type (see allocForType). The entry's returned qubits are
--- measured into fresh classical bits so the Python side can read the
--- result.
+-- matching its type (see allocForType). The entry's return value
+-- contributes classical output bits only insofar as it already is
+-- classical (an already-measured bool) -- a returned live qubit is left
+-- exactly as the source program left it, unmeasured (see collectOutputs).
 compileProgram :: Program -> Either String Circuit
 compileProgram (Program []) = Left "circuit: empty program"
 compileProgram (Program fs) = do
@@ -431,16 +555,31 @@ compileProgram (Program fs) = do
     })
 
 -- | Classical bits that carry the entry function's return value: an
--- already-measured bool contributes its bit directly, a returned qubit is
--- measured into a fresh one, and a returned pair contributes both halves in
--- order. (true/false/unit contribute nothing -- a compile-time-known
--- classical value the simulator has no bit to read.)
+-- already-measured bool contributes its bit directly, and a returned pair
+-- contributes both halves in order. (true/false/unit contribute nothing --
+-- a compile-time-known classical value the simulator has no bit to read.)
+--
+-- A returned *live* qubit (LLeaf) contributes nothing either, deliberately
+-- -- this used to measure it into a fresh classical bit so --simulate had
+-- something to report, but that measurement is a real operation the source
+-- program never asked for. Compiling a circuit is supposed to produce an
+-- exact translation of the source, and correctness of that translation
+-- comes before anything else this tool does with it afterward: a
+-- standalone tool being unable to observe an unmeasured qubit's value is
+-- expected and correct (that's what "returns a live qubit" means), not a
+-- gap to paper over by quietly changing what the compiled circuit *is*.
+-- build_circuit.py's --simulate already reports "no measurable output" for
+-- a program with no meas() at all; this makes that message accurate for
+-- "the program returns an unmeasured qubit" too, instead of only firing for
+-- bool/unit returns as before. If a program's own meas() calls already
+-- produce the classical result you want to observe, --simulate reports
+-- those bits exactly as before -- this only changes the previously-silent
+-- synthetic case.
 collectOutputs :: LocTree -> CState -> (CState, [Int])
 collectOutputs (LBit c)   st = (st, [c])
 collectOutputs (LBool _)  st = (st, [])  -- compile-time-known constant: nothing for the simulator to read
 collectOutputs LUnit      st = (st, [])
-collectOutputs (LLeaf q)  st =
-  let (c, st1) = allocCbit st in (emit (IMeas q c) st1, [c])
+collectOutputs (LLeaf _)  st = (st, [])  -- live, unmeasured qubit: left exactly as the source left it
 collectOutputs (LNode a b) st =
   let (st1, ca) = collectOutputs a st
       (st2, cb) = collectOutputs b st1
@@ -456,8 +595,8 @@ renderCircuit c = unlines $
 
 renderInstr :: CInstr -> String
 renderInstr (IAlloc q isOne) = "alloc " ++ show q ++ " " ++ (if isOne then "1" else "0")
-renderInstr (IGate name ts ctrls) =
-  "gate " ++ unpack name ++ " " ++ commaInts ts ++ " " ++ renderCtrls ctrls
+renderInstr (IGate name ts ctrls cctrls) =
+  "gate " ++ unpack name ++ " " ++ commaInts ts ++ " " ++ renderCtrls ctrls ++ " " ++ renderCtrls cctrls
 renderInstr (IMeas q c) = "meas " ++ show q ++ " " ++ show c
 
 renderCtrls :: [(Int, Bool)] -> String

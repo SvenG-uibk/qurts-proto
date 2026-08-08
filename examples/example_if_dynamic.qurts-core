@@ -1,0 +1,18 @@
+fn example_if_dynamic < | > () -> # top bool * # top bool {
+    let c0 = [0]() ;
+    c0 as # bot qbit ;
+    let c1 = H(c0) ;
+    let b = meas(c1) ;
+    let y0 = [0]() ;
+    y0 as # bot qbit ;
+    let y1 = if b {
+        let y = [X](y0) ;
+        y
+    } else {
+        noop ;
+        y0
+    } ;
+    let b2 = meas(y1) ;
+    let result = (b, b2) ;
+    result
+}

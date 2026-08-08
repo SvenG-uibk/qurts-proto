@@ -1,7 +1,7 @@
 fn toffoli < alpha | > (x : & alpha qbit , y : & alpha qbit , z : # alpha qbit) -> # alpha qbit {
     let result = qif x {
         let inner = qif y {
-            let r = [not](z) ;
+            let r = [X](z) ;
             r
         } else {
             noop ;

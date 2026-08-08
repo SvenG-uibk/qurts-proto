@@ -5,7 +5,7 @@ fn innermost < alpha | > (c : & alpha # top qbit) -> # alpha qbit {
 
 fn middle < alpha | > (c : & alpha # top qbit) -> # alpha qbit {
     let tmp = innermost<alpha>(c) ;
-    let result = [not](tmp) ;
+    let result = [X](tmp) ;
     result
 } ;
 

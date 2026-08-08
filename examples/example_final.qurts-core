@@ -1,6 +1,6 @@
-fn main <| > () -> #top bool {
+fn main < | > () -> # top bool {
     let x0 = [0]() ;
-    x0 as #bot qbit ;
+    x0 as # bot qbit ;
     let x1 = H(x0) ;
     newlft alpha ;
     let r = &alpha x1 ;

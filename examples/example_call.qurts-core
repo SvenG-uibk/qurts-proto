@@ -1,5 +1,5 @@
 fn nott < | > (x : # bot qbit) -> # bot qbit {
-    let result = [not](x) ;
+    let result = [X](x) ;
     result
 } ;
 

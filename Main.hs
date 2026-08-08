@@ -8,7 +8,7 @@ import System.Process     ( createProcess, proc, CreateProcess (..), StdStream (
                            , waitForProcess )
 import System.IO          ( hClose, hPutStr )
 import Control.Exception  ( try, IOException )
-import Data.List          ( isSuffixOf, isInfixOf, sort, intercalate )
+import Data.List          ( isSuffixOf, isPrefixOf, isInfixOf, sort, intercalate )
 import Control.Monad      ( when )
 
 import QurtsGrammar.Par   ( pProgram, myLexer )
@@ -29,8 +29,9 @@ main = do
     ["-check",     file] -> checkFile file
     ["-uncompute", file] -> uncomputeFile file
     ["-test",      dir]  -> testDir dir
-    ["-v",         file] -> runPipeline True  file
-    [file]                -> runPipeline False file
+    ["-v",         file] -> runPipeline True  False file
+    ["-simulate",  file] -> runPipeline False True  file
+    [file]                -> runPipeline False False file
     _                     -> usage
 
 usage :: IO ()
@@ -41,6 +42,9 @@ usage = do
   putStrLn "                                         circuit IR"
   putStrLn "  qurts -v <file.qurts-core>          -- full pipeline; pretty-printed output"
   putStrLn "                                         after every step"
+  putStrLn "  qurts -simulate <file.qurts-core>   -- full pipeline; also runs the compiled"
+  putStrLn "                                         circuit on Aer (1000 shots) and prints"
+  putStrLn "                                         its outcome distribution"
   putStrLn "  qurts -parse <file.qurts-core>      -- parse only"
   putStrLn "  qurts -check <file.qurts-core>      -- parse and type check"
   putStrLn "  qurts -uncompute <file.qurts-core>  -- parse, check, uncompute; writes the"
@@ -115,9 +119,11 @@ uncomputeFile file = do
 -- circuit diagram (not our own internal IR -- that IR is just the
 -- interchange format between this stage and Qiskit, see circuit/Circuit.hs).
 -- Quiet by default (only the diagram goes to stdout); -v prints a
--- pretty-printed snapshot after every step along the way.
-runPipeline :: Bool -> FilePath -> IO ()
-runPipeline verbose file = do
+-- pretty-printed snapshot after every step along the way; -simulate also
+-- runs the compiled circuit on Aer and prints its outcome distribution
+-- (see showCircuit).
+runPipeline :: Bool -> Bool -> FilePath -> IO ()
+runPipeline verbose simulate file = do
   contents <- readFile file
   case pProgram (myLexer contents) of
     Left err -> die ("parse error: " ++ err)
@@ -143,26 +149,31 @@ runPipeline verbose file = do
                 Left err -> die ("circuit compilation failed: " ++ err)
                 Right circ -> do
                   when verbose $ putStrLn "=== Circuit ==="
-                  showCircuit circ
+                  showCircuit simulate circ
 
 -- | Render a compiled Circuit the way Qiskit itself represents it: pipe our
 -- flat IR into circuit/build_circuit.py (over stdin, via its "-" filename)
 -- and let it print the ASCII circuit diagram it draws from the actual
--- qiskit.QuantumCircuit it builds. Deliberately does *not* capture the
--- child's stdout/stderr as a pipe and re-print it -- earlier versions did,
--- and it mangled the box-drawing characters into mojibake on Windows
--- (GHC's own console-codepage handling doesn't agree with a byte-for-byte
--- forward through a pipe). Instead the child inherits our real stdout/
--- stderr directly, so Python's own native Windows-console writing (which
--- talks to the console API directly and doesn't depend on the console's
--- codepage at all) does the job -- no forwarding to get wrong.
+-- qiskit.QuantumCircuit it builds. When `simulate` is set, also passes
+-- --simulate (with a fixed 1000 shots, matching the -simulate flag's own
+-- one job) so build_circuit.py additionally runs the circuit on Aer and
+-- prints its outcome distribution -- for a different shot count, run
+-- `python circuit/build_circuit.py <ir-file> --simulate --shots=N` directly
+-- (see circuit/README.md). Deliberately does *not* capture the child's
+-- stdout/stderr as a pipe and re-print it -- earlier versions did, and it
+-- mangled the box-drawing characters into mojibake on Windows (GHC's own
+-- console-codepage handling doesn't agree with a byte-for-byte forward
+-- through a pipe). Instead the child inherits our real stdout/stderr
+-- directly, so Python's own native Windows-console writing (which talks to
+-- the console API directly and doesn't depend on the console's codepage at
+-- all) does the job -- no forwarding to get wrong.
 -- Requires `python` on PATH with qiskit installed (see circuit/README.md);
 -- if that's not available, fails loudly with what went wrong and falls
 -- back to printing our own IR, so the tool still gives you *something*.
-showCircuit :: Circuit -> IO ()
-showCircuit circ = do
+showCircuit :: Bool -> Circuit -> IO ()
+showCircuit simulate circ = do
   let ir = renderCircuit circ
-  result <- try (runBuildCircuit ir) :: IO (Either IOException ExitCode)
+  result <- try (runBuildCircuit simulate ir) :: IO (Either IOException ExitCode)
   case result of
     Right ExitSuccess -> return ()
     Right (ExitFailure _) -> do
@@ -177,10 +188,11 @@ showCircuit circ = do
 
 -- | Run build_circuit.py, feeding it `ir` over stdin; its stdout/stderr
 -- inherit ours directly (see showCircuit for why).
-runBuildCircuit :: String -> IO ExitCode
-runBuildCircuit ir = do
+runBuildCircuit :: Bool -> String -> IO ExitCode
+runBuildCircuit simulate ir = do
+  let simArgs = if simulate then ["--simulate", "--shots=1000"] else []
   (Just hin, Nothing, Nothing, ph) <- createProcess
-    (proc "python" ["circuit/build_circuit.py", "-", "--draw"]) { std_in = CreatePipe }
+    (proc "python" (["circuit/build_circuit.py", "-", "--draw"] ++ simArgs)) { std_in = CreatePipe }
   hPutStr hin ir
   hClose hin
   waitForProcess ph
@@ -286,15 +298,20 @@ testFile file = do
 -- | Render the table: FILE, RESULT and UNCOMPUTE are column-aligned, padded
 -- to at least their header's own width so "OK"/"-" line up under it;
 -- CIRCUIT trails as free text. UNCOMPUTE's width deliberately ignores FAIL
--- messages (only "OK"/"-" -- always short -- feed into it): a FAIL reason
--- can be arbitrarily long, and padTo only ever pads up, never truncates,
--- so that row's CIRCUIT just starts further right instead of every row
--- (including all the plain "OK" ones) paying for the rare long one.
+-- messages (only "OK"/"-" -- always short -- feed into it), and RESULT's
+-- width does the same for any "FAIL (...)" label: a FAIL reason can be
+-- arbitrarily long (e.g. a full TypeError's own show output), and padTo
+-- only ever pads up, never truncates, so that one row's CIRCUIT just starts
+-- further right instead of every row (including all the plain "PASS" ones)
+-- paying column-width tax for the rare long one. Confirmed this matters in
+-- practice, not just in theory: TypeChecker.hs's own "not a known classical
+-- injection for [c](x)" error message alone is long enough to blow every
+-- row in the table out past 500 columns before this exclusion was added.
 formatTable :: [TestRow] -> String
 formatTable rows = intercalate "\n" (header : sep : map formatRow rows)
   where
     fileW  = maximum (length "FILE"   : map (length . rowFile)  rows)
-    lblW   = maximum (length "RESULT" : map (length . rowLabel) rows)
+    lblW   = maximum (length "RESULT" : [ length (rowLabel r) | r <- rows, not ("FAIL" `isPrefixOf` rowLabel r) ])
     uncW   = maximum [length "UNCOMPUTE", length "OK", length "-"]
     header = padTo fileW "FILE" ++ "  " ++ padTo lblW "RESULT" ++ "  " ++ padTo uncW "UNCOMPUTE" ++ "  CIRCUIT"
     sep    = replicate (length header) '-'

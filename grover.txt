@@ -1,0 +1,171 @@
+Qurts-core Grover example: unsound uncomputation shortcut, and a gap versus
+the paper's own phase(pi) idiom
+================================================================================
+
+1. What was wrong
+
+Uncompute.hs's automatic drop-reversal used to special-case "diagonal" gates
+(Z, S, T, ...): when reversing a value's construction history, it skipped
+re-applying a diagonal gate, on the reasoning that "a diagonal gate never
+moves a qubit to a different basis branch, only phases it, so undoing it is
+never necessary to reach |0>". That's true only when the diagonal gate is
+applied to a qubit that's already confined to a single computational-basis
+ket at the point it's applied (e.g. Grover's own phase-kickback, where the
+"marked" qubit already deterministically encodes f(x)).
+
+It is not true in general. Counterexample: apply H then Z (both bare EU,
+i.e. general unitaries) to a qubit *inside one branch of a qif*, leave the
+other branch untouched, and drop the qif's result. This type-checks (see
+"the qif issue" below), and with the old skip logic the two branches
+disagreed on the qubit's final value after the reversal -- i.e. it was left
+entangled with the qif's control instead of being disentangled to |0>. That
+is exactly the invalid discard Definition 2.1 forbids.
+
+Fix applied: removed the skip entirely. Uncompute.hs now reverses every gate
+via its own exact inverse, in exact reverse order, unconditionally -- which
+is what the uncomputation-semantics theorem (Thm 5.4, its equivalence with
+simulation semantics) actually establishes, with no gate-name-based
+exception. Also closed a related gap: TypeChecker.hs's `[c](x)` (EC) rule
+accepted *any* identifier as `c`, including non-classical gates like H --
+`[H](x)` type-checked exactly like `[not](x)`, preserving droppability for a
+gate that mixes basis states. This was only ever caught by accident,
+downstream, when the gate-inverse lookup table happened not to recognise the
+name. `[c]` is now restricted to a small, closed, verified registry
+(not/cnot/swap), matching Section 3.2.1's own description of `[c]` as "the
+lift of a classical Boolean injective function" (and matching Unqomp's qfree
+definition literally: coefficient exactly 1, no phase -- which even Z fails).
+
+2. The "qif issue": why removing the skip regressed the shipped Grover example
+
+`typ_qif`'s own rule assigns the *qif's* result type #alpha T from the
+branches' type T, regardless of what tag T itself carried -- including
+#bot, which can arise from a bare EU gate (e.g. H) used *inside* one branch.
+We checked this against the paper's own prose (Sec 3.2.2: "the return value
+of the qif statement has type #'a T ... where T is the type of the
+branches") and against the paper's own toy example (`qif r { [1]() } else
+{ [0]() }`, where the branches naturally produce #top, not #alpha) -- this
+retagging is correct and matches the paper; it isn't the bug. The bug was
+entirely in the uncomputation pass assuming it could skip a step without
+checking it was safe to. With the skip removed, this exact retagging case
+(H;Z inside a branch, dropped) was re-verified to uncompute correctly.
+
+What *did* regress is the example itself: `example_grover.qurts-core`'s
+oracle computed a temporary boolean-like ancilla via `oracle(x,y,z)`
+(purely classical, `[not]`/qif, no phase anywhere in its own history), then
+applied the phase via `let tmp = phase(tmp)` where `phase(a) = [Z](a)` --
+i.e. a *rebind*. That rebind put Z into tmp's own tracked reversible
+history. Once Z is no longer skipped, dropping tmp faithfully reverses Z
+right next to itself (Z.Z = I), erasing exactly the phase kickback the
+oracle was meant to imprint on x,y,z. Verified: post-fix, the shipped
+Grover's simulated output distribution went from a clean peak at |111>
+to uniform over all 8 outcomes.
+
+This is not a bug in the fix -- it's Unqomp's own qfree criterion asserting
+itself: Z is not qfree (it carries a phase, coefficient != 1), so Unqomp's
+own algorithm would refuse to auto-reverse it too, and Unqomp's paper states
+plainly that Grover/Deutsch-Jozsa's phase kickback is "built by hand,
+entirely outside" their automatic machinery. The shipped example was
+relying on an unsound shortcut to get the right numeric answer.
+
+3. Why the paper's own phase(pi)/borrow idiom can't be transcribed into
+   qurts-core as formalised
+
+Section 3.1's own "explicit uncomputation" desugaring:
+
+    let r = &xl;
+    let tmp: #qbit = oracle(r);
+    qif &tmp { phase(pi) } else { noop };
+    drop tmp;
+
+is not itself expressible in the qurts-core core calculus (Section 3.2)
+this implementation follows -- confirmed directly, not assumed:
+
+  a) `phase(pi)` is "the map -1: C -> C" (Appendix A) -- it produces no
+     qubit, so a qif branch built from it has type (). `typ_qif` requires
+     both branches to be Purely Quantum (Fig. 7); () fails that
+     unconditionally. Verified: type-checking a `qif` with a ()-typed
+     branch gives `NotPurelyQuantum "... return type is not PQ: TyUnit"`.
+
+  b) The `qif ...;` line above is used as a bare statement -- its result is
+     never named. The core grammar's `Stmt` has no "expression as its own
+     statement" production; every expression must be `let`-bound.
+
+Both are core-calculus rules, not implementation gaps specific to this
+Haskell codebase. This matches the paper's own footnote 4: Grover's code
+(Fig. 2, Appendix A) "use[s] some standard features from Rust... not
+formally defined in Section 3.2... part of an implementation of Qurts in
+development." So no encoding of Grover into qurts-core-as-specified can be a
+literal transcription of Section 3.1's snippet; it was always necessarily a
+translation.
+
+4. What we did about it
+
+Two alternative, verified-sound re-encodings of Grover's oracle and
+diffusion phase step, avoiding the rebind-into-Z pattern entirely:
+
+  - example_grover.qurts-core: direct phase oracle. Z applied straight to
+    one search-register qubit, controlled by the other two via nested qif
+    -- no ancilla at all, nothing ever dropped through a Z-touched value.
+    Simulated: 952/1000 on |111>. Simpler circuit than the original (3
+    qubits instead of 7).
+
+  - example_grover2.qurts-core: phase-kickback ancilla. A dedicated qubit
+    prepared in |-> (via [1](); H -- necessarily via bare EU, which
+    permanently forfeits its droppability, matching how this type system
+    already treats any general unitary). The oracle's classical
+    computation is XORed into it (matching the standard textbook Grover
+    ancilla trick: |-> is a -1-eigenstate of the flip, so the ancilla's own
+    state is unchanged by this and never needs uncomputing at all). The
+    ancilla is threaded through both Grover iterations and consumed via
+    meas() at the very end (never via drop -- consistent with the type
+    system already refusing to make #bot droppable). Simulated: 938/1000
+    on |111>.
+
+Both are standard ways to implement a Grover phase oracle; neither is the
+paper's own borrow-based construction, because -- per point 3 -- that
+construction isn't expressible in the calculus as specified.
+
+4b. A tempting refinement that was considered and rejected: basis-tracking
+
+Before settling on the two re-encodings above, we considered reinstating a
+*refined* version of the diagonal skip: instead of "skip any gate named
+Z/S/T", track per-value whether it is provably confined to a computational
+basis ket (propagate "classical" through [0]/[1]/not/cnot/swap/X/Y/Z/S/T,
+break it at H/Rx/Ry), and only skip a diagonal gate's reversal when its
+input is provably classical in that sense. Checked by hand against both
+cases: it correctly identifies the original oracle-ancilla pattern as safe
+to skip (its whole history before Z is qif/not/[0]/[1], no H anywhere) and
+correctly identifies the H;Z-in-a-qif-branch counterexample as unsafe
+(H breaks classicality, forcing full reversal, avoiding the earlier bug).
+So this refinement is *sound*, strictly more precise than the removed
+name-based check, and would let the ancilla+Z+drop pattern -- structurally
+closer to the paper's own oracle/tmp separation -- type-check and work.
+
+We didn't implement it anyway. The reason connects directly to point 5
+below: Qurts's typing judgements (Fig. 4) carry exactly two pieces of
+per-variable information, a type and an Aliveness (`active` or `frozen-by-
+some-lifetime`) -- nothing about the qubit's quantum state. `canDrop`,
+`isPurelyQuantumType`, `typ_qif` are all syntactic (which constructs were
+used) or lifetime-based (is `alpha` active); none of them, nor any theorem
+in the paper, ever reasons about what basis state a value is confined to.
+"Classical-basis tracking," however carefully designed and however sound
+its soundness argument, is a new analysis the paper's type system doesn't
+have and its theorems don't cover -- the same category of problem as the
+original unsound diagonal skip, just done more rigorously. Given the goal
+was to implement exactly what the paper's theorems establish and nothing
+more, this was set aside in favour of the two re-encodings that need no
+extra analysis at all.
+
+5. Open question for the paper's author
+
+Is Section 3.1's phase(pi)-via-borrow idiom intended to be part of the
+*formal* core calculus, or is it deliberately scoped as "full Qurts" sugar
+outside Section 3.2, same as mutable references and for-loops? If the
+former, it needs: (a) a qif-branch-return exemption from the Purely Quantum
+requirement specifically for this construct (or a redefinition of PQ that
+admits it), (b) a grammar extension for a bare/discarded qif statement (or
+an explicit "let _ = ..." binding form), and (c) a compilation rule that
+Circuit.hs would need: "qif ctrl { phase(pi) } else { noop }" must compile
+directly to a Z gate on ctrl's own qubit, bypassing the ordinary
+per-branch-value compilation path. None of that is covered by the paper's
+existing theorems (4.5, 5.4), so it would need its own soundness argument.

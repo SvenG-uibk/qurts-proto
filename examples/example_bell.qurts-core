@@ -1,0 +1,27 @@
+fn bell < | > () -> # bot qbit * # bot qbit {
+
+    let q0 = [0]() ;
+    let q1 = [0]() ;
+
+    q0 as # bot qbit ;
+    let q0 = H(q0) ;
+
+    newlft alpha ;
+    let rq0 = &alpha q0 ;
+
+    let q1 = qif rq0 {
+        let t = [X](q1) ;
+        t
+    } else {
+        noop ;
+        q1
+    } ;
+
+    drop rq0 ;
+    endlft alpha ;
+
+    q1 as # bot qbit ;
+
+    let pair = (q0, q1) ;
+    pair
+}

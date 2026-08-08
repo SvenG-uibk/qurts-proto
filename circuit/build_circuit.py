@@ -8,15 +8,21 @@ IR format (one instruction per line):
     qubits <n>
     cbits  <m>
     alloc  <q> <0|1>            # 0 => |0> (no-op), 1 => X to make |1>
-    gate   <name> <t0,t1,..> <ctrls>   # ctrls: '-' or c0=1,c1=0,...
+    gate   <name> <t0,t1,..> <ctrls> <cctrls>  # each: '-' or c0=1,c1=0,...
     meas   <q> <c>
     output <c0,c1,..>          # classical bits holding the return value
 
-Gate names map to Qiskit gates; a controlled gate becomes the base gate's
-.control(len(ctrls), ctrl_state=...), with ctrl_state built from the
+Gate names map to Qiskit gates; a quantum-controlled gate becomes the base
+gate's .control(len(ctrls), ctrl_state=...), with ctrl_state built from the
 per-control polarities (Qiskit reads ctrl_state right-to-least-significant).
+<cctrls> comes from a classical `if` on a *dynamic* (measured) condition:
+only one branch's gates ever actually run, decided at runtime by the
+measured bit rather than superposed, so each is wrapped in Qiskit's
+if_test control-flow builder (nested, one per classical bit, so several
+conditions AND together the same way several quantum controls do above).
 """
 import sys
+from contextlib import ExitStack
 
 from qiskit import QuantumCircuit
 
@@ -33,10 +39,20 @@ GATES = {
     "Sdg": ("sdg",  1),
     "T":   ("t",    1),
     "Tdg": ("tdg",  1),
-    "not": ("x",    1),   # [not] is the 1-qubit lift of X
     "cnot": ("cx",  2),   # [cnot]: 2-qubit
     "swap": ("swap", 2),
 }
+
+
+def _parse_conds(field):
+    """Parse a ctrls/cctrls field: '-' or 'c0=1,c1=0,...' -> [(index, bool)]."""
+    if field == "-":
+        return []
+    conds = []
+    for c in field.split(","):
+        idx, pol = c.split("=")
+        conds.append((int(idx), pol == "1"))
+    return conds
 
 
 def parse_ir(text):
@@ -58,12 +74,9 @@ def parse_ir(text):
         elif head == "gate":
             name = parts[1]
             targets = [] if parts[2] == "-" else [int(t) for t in parts[2].split(",")]
-            ctrls = []
-            if parts[3] != "-":
-                for c in parts[3].split(","):
-                    q, pol = c.split("=")
-                    ctrls.append((int(q), pol == "1"))
-            instrs.append(("gate", name, targets, ctrls))
+            ctrls = _parse_conds(parts[3])
+            cctrls = _parse_conds(parts[4])
+            instrs.append(("gate", name, targets, ctrls, cctrls))
         elif head == "meas":
             instrs.append(("meas", int(parts[1]), int(parts[2])))
         elif head == "output":
@@ -81,39 +94,54 @@ def build(qubits, cbits, instrs):
             if is_one:
                 qc.x(q)              # qubits start at |0>; X makes |1>
         elif ins[0] == "gate":
-            _, name, targets, ctrls = ins
-            apply_gate(qc, name, targets, ctrls)
+            _, name, targets, ctrls, cctrls = ins
+            apply_gate(qc, name, targets, ctrls, cctrls)
         elif ins[0] == "meas":
             _, q, c = ins
             qc.measure(q, c)
     return qc
 
 
-def apply_gate(qc, name, targets, ctrls):
+def apply_gate(qc, name, targets, ctrls, cctrls):
     if name not in GATES:
         raise ValueError(f"unknown gate {name!r}")
     method, arity = GATES[name]
     if len(targets) != arity:
         raise ValueError(f"gate {name} wants {arity} targets, got {len(targets)}")
 
-    if not ctrls:
-        getattr(qc, method)(*targets)
+    def apply_quantum(target_circuit):
+        if not ctrls:
+            getattr(target_circuit, method)(*targets)
+            return
+
+        # Controlled: build the base gate, wrap in .control() with a
+        # ctrl_state whose bits are the control polarities. Qiskit's
+        # ctrl_state is a bit string read most-significant-first over the
+        # control qubits in the order we pass them, so build it to match
+        # ctrl_qubits order below.
+        base = QuantumCircuit(arity, name=name)
+        getattr(base, method)(*range(arity))
+        gate = base.to_gate()
+
+        ctrl_qubits = [q for q, _ in ctrls]
+        # ctrl_state string: leftmost char = highest-order control. We list
+        # controls in ctrl_qubits order, so reverse polarities into the string.
+        ctrl_state = "".join("1" if pol else "0" for _, pol in reversed(ctrls))
+        cgate = gate.control(len(ctrls), ctrl_state=ctrl_state)
+        target_circuit.append(cgate, ctrl_qubits + targets)
+
+    if not cctrls:
+        apply_quantum(qc)
         return
 
-    # Controlled: build the base gate, wrap in .control() with a ctrl_state
-    # whose bits are the control polarities. Qiskit's ctrl_state is a bit
-    # string read most-significant-first over the control qubits in the
-    # order we pass them, so build it to match ctrl_qubits order below.
-    base = QuantumCircuit(arity, name=name)
-    getattr(base, method)(*range(arity))
-    gate = base.to_gate()
-
-    ctrl_qubits = [q for q, _ in ctrls]
-    # ctrl_state string: leftmost char = highest-order control. We list
-    # controls in ctrl_qubits order, so reverse polarities into the string.
-    ctrl_state = "".join("1" if pol else "0" for _, pol in reversed(ctrls))
-    cgate = gate.control(len(ctrls), ctrl_state=ctrl_state)
-    qc.append(cgate, ctrl_qubits + targets)
+    # Classically conditioned: from a classical `if` on a dynamic (measured)
+    # condition -- only one branch's gates actually run, so nest one
+    # if_test per classical bit (multiple conditions AND together, same as
+    # multiple quantum controls above) rather than adding a qubit control.
+    with ExitStack() as stack:
+        for cbit, pol in cctrls:
+            stack.enter_context(qc.if_test((qc.clbits[cbit], 1 if pol else 0)))
+        apply_quantum(qc)
 
 
 def main():
@@ -162,8 +190,11 @@ def main():
                   "(pip install qiskit-aer)", file=sys.stderr)
             return
         if cbits == 0 or not any(ins[0] == "meas" for ins in instrs):
-            print("no measurable output (the entry returns a classical/unit "
-                  "value; nothing to sample)")
+            print("no measurable output (the entry returns a compile-time-known "
+                  "classical value, or a live qubit the source never measured -- "
+                  "the compiled circuit is exactly the source program, so there's "
+                  "nothing to sample; add an explicit meas() in the qurts-core "
+                  "source if you want an observable result)")
             return
         from qiskit import transpile
         sim = AerSimulator()

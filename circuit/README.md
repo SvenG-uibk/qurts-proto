@@ -1,14 +1,21 @@
 # circuit
 
-Compiles a qurts-core program to a runnable quantum circuit — the final step after parse/check/uncompute. Two halves: `circuit/Circuit.hs` (+ `circuit/CircuitMain.hs`) turns the *uncomputed* program into a flat text IR; `circuit/build_circuit.py` turns that IR into a Qiskit `QuantumCircuit` you can draw and simulate. The IR is only an interchange format between those two halves — it's never the thing meant to represent "the circuit" to a human; Qiskit's own diagram is.
+Compiles a qurts-core program to a runnable quantum circuit — the step after parse/check/uncompute.
+circuit/Circuit.hs (+ CircuitMain.hs) turns the *uncomputed* program into a flat text IR;
+circuit/build_circuit.py turns that IR into a Qiskit QuantumCircuit. The IR is just the
+interchange format between the two — Qiskit's own diagram is what represents "the circuit".
 
-Compiling the **uncomputed** program (not the original) is what makes it physically realisable: every `drop` has already become a reversal-to-`|0⟩` or a classical no-op, so the circuit never has to discard a non-`|0⟩` qubit. Following the paper's Fig. 10 location model, each variable maps to a set of physical qubit *locations* (a `LocTree`, so pairs keep their shape); gates apply to those locations, and `qif` compiles to controlled operations.
+Compiling the uncomputed program (not the original) is what makes it physically realisable: every
+drop has already become a reversal-to-|0⟩ or a classical no-op. Each variable maps to a set of
+physical qubit locations (a LocTree, following the paper's Fig. 10 model, keeping pair shape);
+qif compiles to controlled operations.
 
-## The easy way: `qurts.exe`
+## The easy way: qurts.exe
 
-`qurts.exe` (built from `Main.hs` at the repo root — see the root `readme.txt`) runs the whole pipeline and, as its last step, pipes the compiled IR into `circuit/build_circuit.py - --draw` over stdin (its stdout/stderr are left to inherit qurts.exe's own, rather than being captured and re-printed) — this is what `qurts <file>` and `qurts -v <file>` show as "the circuit." Requires `python` on PATH with `qiskit` installed; if that fails (missing python, missing qiskit, ...) it prints why and falls back to the raw IR so the tool still gives you something.
-
-Earlier versions captured the child's output through a pipe and re-printed it from Haskell, which mangled the box-drawing characters into mojibake on Windows (GHC's pipe-reading and the console's codepage disagreed about the encoding, no matter what `chcp` was set to). Letting the child inherit the real console directly sidesteps that: Python's own Windows-console writing talks to the console API natively and doesn't depend on the codepage at all, so there's nothing left to get wrong.
+qurts.exe (root Main.hs) runs the whole pipeline and pipes the compiled IR into circuit/build_circuit.py - --draw over stdin, letting Python's stdout/stderr inherit qurts.exe's own rather than capturing and re-printing them — Python's native Windows-console writing handles Unicode correctly there regardless of codepage, which forwarding bytes through a pipe didn't. Requires python on PATH with qiskit installed; otherwise it prints why and falls
+back to the raw IR. `qurts.exe -simulate <file>` additionally passes `--simulate --shots=1000`, so
+it also prints the Aer outcome distribution (needs qiskit-aer too) — for a different shot count,
+run `python circuit/build_circuit.py <ir-file> --simulate --shots=N` directly instead.
 
 ## Building and running by hand
 
@@ -19,49 +26,152 @@ Earlier versions captured the child's output through a pipe and re-printed it fr
 
     python circuit/build_circuit.py out.ir --simulate      # build + run on Aer, print outcome counts
     python circuit/build_circuit.py out.ir --draw          # ASCII circuit diagram
-    python circuit/build_circuit.py - --draw < out.ir      # same, reading the IR from stdin
+    python circuit/build_circuit.py - --draw < out.ir      # same, reading IR from stdin
 
-Requires `qiskit` and `qiskit-aer` (`pip install qiskit qiskit-aer`). The entry point is the program's **last** function; its parameters get fresh `|0⟩` qubits (standalone circuits run on the all-zero input), and its returned qubits are measured into classical bits so `--simulate` can read the result out. When stdout is a real console, `build_circuit.py` leaves it alone — Python's own Windows-console writing already handles `--draw`'s box-drawing characters correctly there, regardless of codepage. Only when stdout is redirected (a file, a pipe, `--draw > out.txt`) does it force UTF-8 (`sys.stdout.reconfigure`), since there's no console to talk to natively at that point and the inherited locale encoding otherwise raised `UnicodeEncodeError` on Windows.
+Requires qiskit and qiskit-aer. The entry point is the program's last function; parameters get
+fresh |0⟩ qubits. The compiled circuit is an exact translation of the source program — it never
+adds a measurement the source didn't ask for. A returned value already classical (from the
+source's own `meas(...)`) contributes its existing classical bit as an `output`; a returned *live*
+qubit contributes nothing and stays unmeasured, exactly as the source left it. `--simulate` reports
+"no measurable output" for a program whose return value isn't already classical — add an explicit
+`meas()` in the qurts-core source if you want an observable result (see the "Fixed: circuits used
+to gain a measurement..." section below).
 
 ## IR format
 
-Line-based, one instruction per line. `<ctrls>` is `-` (none) or `q0=1,q1=0,...` (control qubit = required polarity; `1` positive/`|1⟩`-branch, `0` negative/`|0⟩`-branch).
+One instruction per line. <ctrls>/<cctrls> are each - or q0=1,q1=0,...
+(qubit/classical-bit index = required polarity).
 
     qubits <n>
     cbits  <m>
-    alloc  <q> <0|1>                    # fresh qubit; 1 => X applied to make |1>
-    gate   <name> <t0,t1,...> <ctrls>   # named gate on target qubits, under controls
-    meas   <q> <c>                      # measure qubit q into classical bit c
-    output <c0,c1,...>                  # classical bits holding the entry's return value
+    alloc  <q> <0|1>                            # fresh qubit; 1 => X applied to make |1>
+    gate   <name> <t0,t1,...> <ctrls> <cctrls>  # named gate on target qubits, under controls
+    meas   <q> <c>                              # measure qubit q into classical bit c
+    output <c0,c1,...>                          # classical bits holding the entry's return value
 
-`build_circuit.py` maps gate names (`H`, `X`, `Z`, `S`/`Sdg`, `T`/`Tdg`, `not`, `cnot`, `swap`, ...) to Qiskit gates; a controlled gate becomes `.control(n, ctrl_state=...)` with the state built from the per-control polarities.
+Gate names map to Qiskit gates; a quantum-controlled gate becomes .control(n, ctrl_state=...).
+<cctrls> comes from a classical if on a *dynamic* (measured) condition, where only one
+branch's gates ever actually run: each becomes a Qiskit if_test (nested, one per classical bit)
+rather than an extra qubit control.
 
-## Current coverage
+## Coverage
 
-17 of the 22 non-`_error` examples compile to a circuit — every one the uncomputation pass itself can handle. Handles the gate-and-structure subset — `[0]()`/`[1]()`, `EU`/`EC` gates (single-qubit and literal-pair), renames, `&borrows`, pairs and their destructure, `meas`, the no-op statements (`drop`/`as`/`newlft`/`endlft`), entry parameters (fresh `|0⟩` per qubit, `false` per bool) — plus three bigger pieces:
+18 of 23 non-_error examples compile — every one the uncomputation pass can handle. Beyond
+single gates/pairs/renames/borrows/meas:
 
-- **`qif` → controlled gates.** Each branch is classified by tracing its return variable back through its own statements (`classifyReturn` in `Circuit.hs`): `RFresh` (built from `[0]()`/`[1]()`) or `RInput x` (threads an existing variable through, gated or not — the `[not](q)` / `noop; q` shape). Both branches of one `qif` must classify the same way and unify onto a single shared result location — the common input's location for `RInput`/`RInput`, one fresh `|0⟩` qubit for `RFresh`/`RFresh` — since physically there's only ever one qubit in superposition across both branches, never two that get "merged" afterward (confirmed against the paper's own location model, Fig. 10, and its "controlled-swap" reading of `qif p { (y,x) } else { (x,y) }`). Every gate a branch emits carries the `qif`'s control appended to whatever controls are already active, so a **nested** `qif` naturally accumulates multiple controls — `qif x { qif y { [1]() } else { [0]() } } else { [0]() }` compiles straight to a Toffoli.
-- **Function call inlining.** A callee's body compiles directly into the caller's own instruction stream (same qubit/cbit counters), with its parameters bound to the caller's argument locations — a reference argument shares the exact qubit it points at. Mirrors `Uncompute.hs`'s own `resolveExpr`/`ECall` inlining; termination is guaranteed the same way (the call graph is a DAG — `TypeChecker.hs`'s `checkProgram` only allows calling functions already defined earlier).
-- **Classical `if`.** Unlike `qif`, at most one branch of a classical `if` ever actually runs, so it's compiled by picking a branch outright rather than emitting a controlled gate — but only once the condition is resolved to a compile-time-known `LBool`, which it always is in the current examples: `true`/`false` literals bind one directly, and (mirroring the existing "entry runs on the all-zero input" convention for qubit parameters) a `bool` entry parameter defaults to `LBool False`. `example_if.qurts-core`'s `if b { true } else { false }` on a `bool` parameter `b` compiles to an empty circuit (0 qubits, 0 gates) — the `false` branch is selected at Haskell-compile time and the unreached `true` branch leaves no trace, confirmed by inspecting the emitted IR. A condition that's a genuinely dynamic classical bit (from `meas`, tracked as `LBit`) is deliberately **not** handled — that needs Qiskit's classically-controlled gates (`c_if`/`if_test`), and no current example exercises it, so it fails loudly instead of being guessed at.
+- **qif → controlled gates.** Each branch is classified by its return shape (RFresh from
+  [0]()/[1](), or RInput x threading a value through) and both branches unify onto one
+  shared result location. Every gate a branch emits carries the qif's control appended to any
+  already active, so nested qif compiles straight to a multi-controlled (Toffoli-shaped) gate.
+- **Function call inlining.** A callee's body compiles into the caller's own instruction stream,
+  with its parameters bound to the caller's argument locations.
+- **Classical if**, when the condition resolves to a compile-time-known bool (a literal, or a
+  bool parameter's default false): picks a branch outright, no gate emitted.
+- **Classical if on a dynamic (measured) condition** (example_if_dynamic): the same
+  RFresh/RInput branch classification as qif, but instead of a qubit control, every gate a
+  branch emits is wrapped in a Qiskit if_test conditioned on the measured classical bit
+  (positive for the then-branch, negative for the else) — since only one branch's gates actually
+  execute, decided at run time rather than by superposition. Getting a program that reaches this
+  path through the type checker at all needed two companion fixes: expr_classical_if was
+  matching condition variables against literal TyBool, but meas/true/false all produce
+  #⊤bool per the paper's own typing rules (Figure 15) — nothing but a bare bool *parameter*
+  could ever satisfy it before; and the condition variable wasn't restored to context afterward,
+  unlike qif's control variable, even though the paper's Γ+Δ split for expr_classical_if is
+  identical to expr_quantum_if's (Figure 15) and the existing qif code already did this. Both
+  were implementation gaps relative to the paper, not deliberate restrictions — see the comments
+  on checkExpr (EIf ...) in typeChecker/TypeChecker.hs.
 
-**Verified by simulation, not just by compiling** — a wrong circuit has no type checker to catch it, so every increment was checked against a case a broken version couldn't fake:
-- `example_my_cnot`'s compiled CX, with an `H` added on the control, produces a clean **Bell state** (`00`/`11` only, `01`/`10` never) — confirms control, target, and polarity are all correct, not just "some gate got emitted."
-- `example_and`'s Toffoli reproduces the exact **AND truth table** across all 4 inputs.
-- `example_call`/`example_nested_call_reversal` return `|1⟩`/`|0⟩` exactly as their gate chains predict by hand.
-- `example_section6_f`'s `H` gives the expected ~50/50 split, with the two physically-impossible outcomes never appearing.
+Verified by simulation for the examples whose own source already calls `meas(...)` on what they
+return (example_final/example_qif_reversal give a clean ~50/50 split; example_if_dynamic's
+measured condition and its classically-corrected qubit always agree, only 00/11 outcomes;
+example_grover peaks at |111⟩, ~93-94% over 1000-2000 shots, matching the paper's own numbers).
+Examples that intentionally return a live, unmeasured qubit matching the paper's own signature
+(example_and, example_call, example_section6_f) are checked by inspecting the compiled gate
+structure directly instead (a genuine Toffoli/CCX for AND, a single `not` for the call example,
+...) — `--simulate` on those reports "no measurable output" now, correctly, since the compiled
+circuit is an exact translation of a source that never measures anything (see below).
 
-Not handled yet (fails loudly rather than miscompiling): classical `if` on a dynamic (measurement-derived) condition. Anything the uncomputation pass itself can't handle (the shared-dependency/pebble-game cases — see `uncompute/README.md`) never reaches this stage at all.
+## Fixed: example_grover.qurts-core used to give the wrong answer
 
-## Known issue: `example_grover.qurts-core` simulates to the wrong answer (not pursuing a fix right now)
+Used to compile fine but simulate to a uniform distribution instead of a peak at |111⟩. Cause: the
+compiled IR applied Z to the same qubit twice in a row (Z·Z = I), cancelling Grover's phase
+kickback. example_grover.qurts-core applies the phase via `let tmp1 = phase<alpha1>(tmp1)`, a
+rebind — that put `[Z]` into tmp1's own reversible history, so `Uncompute.hs` reversed it right
+along with everything else when `drop tmp1` got reversed, giving `oracle; Z; Z; oracle⁻¹` instead
+of the intended `oracle; Z; oracle⁻¹`.
 
-Compiling `example_grover.qurts-core` succeeds (7 qubits, 49 instructions) but **simulating it gives a uniform distribution over all 8 outcomes, not the expected peak at `|111⟩`** (Grover's marked state). This was found *by* the simulation layer — nothing upstream (type-checking, uncomputation's own round-trip check) catches it, because the output is a perfectly well-typed, physically-realisable circuit that just computes the wrong thing.
+The paper's own idiom (Section 3.1) applies the phase as a *borrowed* read of `tmp`
+(`qif &tmp { phase(π) } else { noop }`), never rebinding it — so the phase never enters `tmp`'s
+own tracked history at all, and `drop tmp`'s reversal only ever sees the oracle qif, not the
+phase. That idiom isn't expressible in actual qurts-core, though: `phase(π)` there takes no qubit
+argument (it's a targetless "flip the current branch's amplitude" primitive the paper itself
+footnotes as sugar from "an implementation of Qurts in development", outside Section 3.2's formal
+grammar) — every gate application in real qurts-core is a `let`-rebind by construction, so there's
+no way to apply `[Z]` to a value without it entering that value's own reversible history.
 
-**Root cause, confirmed by isolation:** the compiled IR contains `gate Z 3` immediately followed by another `gate Z 3` on the same qubit (and the same pattern on the diffusion's other ancillas). Two consecutive `Z`s cancel (`Z·Z = I`), destroying Grover's phase kickback. Deleting just the second (reversal) `Z` from each pair — nothing else — changes the simulated result to `111: 965/1024` (94%), textbook Grover amplification. That isolates the bug to exactly this double-`Z`, and rules out the circuit compiler itself: given the *correct* circuit, it produces the *correct* physics.
+Fixed in `Uncompute.hs`/`GateInverse.hs` instead: a diagonal gate (`Z`, `S`, `Sdg`, `T`, `Tdg`, `I`
+— never moves a qubit to a different computational-basis branch, only phases it) never needs to be
+undone to return a value to `|0⟩`, so `reverseOrigin`'s `FromGate`/`FromClassicalGate` cases now
+skip straight through to reversing whatever produced that branch membership (the entangling qif),
+leaving the diagonal gate exactly where it was applied. This matches the paper's own drop
+semantics directly: the simulation semantics for `drop` zeroes only the dropped register and
+otherwise leaves the survivors' amplitudes untouched — which is exactly what a kicked-back phase
+is. See the `reverseOrigin` comments in `uncompute/Uncompute.hs` for the full argument, including
+why it's sound even when the value being dropped isn't entangled with anything (skipping just
+leaves an unobservable global phase in that case).
 
-**Why the double-`Z` happens:** `example_grover.qurts-core` applies the phase as `let tmp1 = phase<alpha1>(tmp1);` — a **rebind**. That makes `[Z]` part of `tmp1`'s own reversible history, so when `Uncompute.hs` later reverses `drop tmp1`, it dutifully reverses the `[Z]` right along with everything else, cancelling it. The paper's own idiom (`qif &tmp { phase() } else { noop }`, Section 3.1) instead applies the phase as a *controlled* operation with `tmp` only ever *read*, never rebound — so the phase lands on `x`/`y`/`z` (the qubits that survive) rather than on `tmp` (the qubit about to be dropped), and reversing `tmp` alone can't touch it. `examples/README.md`'s own note on `example_grover.qurts-core`, justifying the `qif { phase() } else { noop }` → `phase(tmp)` simplification as "equivalent," is exactly the claim this finding contradicts — it's equivalent for computing the phase, but not for surviving `tmp`'s own later uncomputation.
+Validated against the automatic-uncomputation literature, not just this one example: Unqomp
+(Paradis et al. 2021 — the paper this project's own approach is modelled on, and one the Qurts
+paper itself cites) only ever auto-reverses a gate that is "qfree" (expressible as a purely
+classical function, no phase at all), and justifies excluding `H` specifically because it "mixes
+basis states." It states plainly that "the Deutsch-Jozsa and Grover implementations do not include
+any uncomputation as they leverage phase kickback for the oracle evaluation" — i.e. built by hand,
+entirely outside automatic uncomputation, since `Z` fails their qfree test too. This fix is a step
+more precise than that conservative split: the real criterion for whether a gate's reversal is
+*necessary* is "does it mix basis states" (Unqomp's own stated reason for excluding `H`), not "is
+it qfree" — a diagonal gate fails qfree for an unrelated reason (phase, not superposition) and
+never mixes basis states, so skipping it is sound, while `H` fails for the real reason and is
+correctly still never skipped (`isDiagonalUnitary`/`isDiagonalClassical` in `GateInverse.hs` is
+exactly that distinction).
 
-**Two ways to actually fix this, neither attempted:**
-1. **Fix the example** — rewrite `example_grover.qurts-core` (and check `example_grover_amplified*` for the same shape) to apply the phase as a genuine `qif`-controlled read of `tmp`, matching the paper's own idiom, rather than a rebind. Confirmed the physics on this side (94% on `|111⟩`, isolated to the double-`Z` deletion) — this is squarely "the example was written the wrong way," not a bug in either pass.
-2. **Treat it as an `Uncompute.hs` question** — should reversal recognize that a gate applied to a value only for its *phase* effect (and never rebinding it, or being immediately re-dropped) shouldn't be undone the same way a genuine computation would? This is a materially harder question than (1): distinguishing "this gate's effect must survive `tmp`'s own drop" from "this gate is part of what makes `tmp` need reversing" isn't visible from `tmp`'s own `Origin` chain alone — it edges toward the same shared/joint-dependency territory (Section 5.1's pebble game) already deferred for `example_self_controlled_uncomp.qurts-core` and friends, since it's fundamentally about a gate's effect being shared between the qubit that's dropped and the qubits that aren't.
+## Fixed: the compiler used to add a measurement the source never asked for
 
-Left alone for now, by request — this note is so the finding and both options aren't lost.
+`compileProgram` used to unconditionally measure a returned *live* qubit into a fresh classical
+bit, purely so `--simulate` would have something to report. That's a real correctness bug, not a
+convenience: compiling a circuit is supposed to produce an exact translation of the source
+program, and a measurement is a genuine physical operation — adding one the source never wrote
+means the "compiled circuit" and the actual program have silently diverged. It also wasn't obvious
+from the outside: nothing about `qurts.exe <file>`'s plain diagram output flagged that an extra
+`meas` box on the end wasn't really part of your program.
+
+Fixed in `Circuit.hs`'s `collectOutputs`: a returned live qubit (`LLeaf`) now contributes nothing
+at all — no gate, no output bit — left exactly as the source left it. An already-classical return
+value (from the source's own `meas(...)`) is unaffected, still reported via `output` exactly as
+before. The consequence: several examples that used to show a shot distribution under `--simulate`
+purely because of the removed synthetic measurement (`example_grover`, `example_if_dynamic`) now
+report "no measurable output" *unless* their own source measures what they return — so both were
+updated to call `meas()` explicitly on their final result, matching the pattern
+`example_grover_amplified`/`example_final` already used. This is not a workaround for the fix: it
+makes those examples' own qurts-core source say what they actually mean ("this program's answer is
+the measured bits"), rather than relying on the compiler to invent that meaning after the fact.
+`example_and`/`example_call`/`example_section6_f` intentionally return a live qubit matching the
+paper's own function signatures and were deliberately left alone — see "Coverage" above.
+
+## Fixed: two aliased references controlling the same qif could crash the Qiskit renderer
+
+`example_copy_alias.qurts-core` (`toffoli(y, z, w)`, called with `y = copy x` and `z = copy y` —
+both aliasing the same borrowed qubit as `x`) used to crash with Qiskit's `CircuitError: duplicate
+qubit arguments`. Nesting `qif x { qif y { [X](z) } ... }` accumulates controls via
+`compileQifCore`'s `ctrls ++ [(ctrlLoc, polarity)]`, which has no way to notice that `x` and `y`
+resolve to the identical physical qubit once the call is inlined — so the innermost gate ended up
+with `ctrls = [(0,True),(0,True)]`, the same qubit index listed twice, which `.control()`/
+`.append()` rejects outright.
+
+Fixed with a single normalization pass before any gate is emitted (`Circuit.hs`'s `emitGate`/
+`normalizeCtrls`, routed through from every call site that used to call `emit (IGate ...)`
+directly): two control entries for the same index and polarity are redundant (`q=1 ∧ q=1 ≡ q=1`)
+and collapse to one; two for the same index with *opposite* polarities are a contradiction
+(`q=1 ∧ q=0`) that can never be satisfied, so the gate they'd guard is simply never emitted rather
+than rendered as an impossible instruction. The source program was already well-typed and
+legitimate (aliasing via `copy` on a reference is exactly what Fig. 14 describes); this was purely
+a circuit-rendering gap, not a type-system one.
