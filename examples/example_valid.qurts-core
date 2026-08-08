@@ -1,4 +1,4 @@
-fn example_valid < alpha | > (p : # bot qbit) -> # bot qbit {
+fn example_valid < | > (p : # bot qbit) -> # bot qbit {
     let q = [0]() ;
     newlft alpha ;
     let r = &alpha p ;

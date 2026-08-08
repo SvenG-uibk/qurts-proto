@@ -1,0 +1,23 @@
+fn evil_leq < a , b | > (y : # b qbit) -> # a qbit {
+    a <= b ;
+    y as # a qbit ;
+    y
+} ;
+
+fn example_leq_external_error < | > (p : # bot qbit) -> # top bool {
+    newlft alpha ;
+    newlft beta ;
+    let r = & beta p ;
+    let q = qif r {
+        let z = [1]() ; z
+    } else {
+        let z = [0]() ; z
+    } ;
+    let q2 = evil_leq<alpha, beta>(q) ;
+    drop r ;
+    endlft beta ;
+    drop q2 ;
+    endlft alpha ;
+    let b = meas(p) ;
+    b
+}

@@ -8,7 +8,7 @@ Or through the full pipeline (parse, check, uncompute, compile to a circuit):
 
 .\qurts examples\<filename>.qurts-core
 
-Run all examples at once (28/28 should pass):
+Run all examples at once:
 
 .\qurts -test examples
 
@@ -21,6 +21,10 @@ full command list.
 ### example_and.qurts-core
 Section 3.1, p. 9 — boolean AND via nested qif on two `&α qbit` references, returning an owned
 `#α qbit`.
+
+### example_bell.qurts-core
+Bell pair: `H` on one qubit, then a qif-based CNOT (`[X]` under a borrowed control) onto a second,
+returning both as a pair.
 
 ### example_valid.qurts-core
 Section 3.1, p. 10 — borrows `p` under a fresh `α`, flips an ancilla `q` with qif, drops `q`,
@@ -57,17 +61,11 @@ Classical conditional typing (Fig. 16, typing_if) — a bool parameter selects o
 values via classical `if`.
 
 ### example_if_dynamic.qurts-core
-Classical `if` on a *dynamic* (measured) condition, not a paper example — targets circuit/'s
-if_test gap. Measures a Hadamard'd qubit into `b`, then classically applies `[X]` to a second
-qubit iff `b` measured 1 (the canonical `c_if`/`if_test` use case), returning `(b, y1)`. Getting
-this past the type checker needed two fixes to `checkExpr (EIf ...)`, both gaps relative to the
-paper rather than deliberate restrictions: it matched the condition against literal `TyBool`, but
-`meas`/`true`/`false` all produce `#⊤bool` (Fig. 15) with no subtyping rule down to bare `bool`
-(Fig. 13) — so only a bare-`bool` *parameter* like `example_if`'s could ever satisfy it; and it
-never restored the condition variable afterward the way `qif` restores its own control variable,
-even though `expr_classical_if`'s Γ+Δ split is identical to `expr_quantum_if`'s. Simulating the
-compiled circuit confirms the fix: `b`'s measurement and `y1`'s final value always agree (only
-`00`/`11` outcomes, ~50/50, across 2000 shots) — see `circuit/README.md`'s "Coverage" section.
+Classical `if` on a *dynamic* (measured) condition — not a paper example, targets circuit/'s
+`if_test` compilation path. Measures a Hadamard'd qubit into `b`, then classically flips a second
+qubit iff `b` measured 1. Fixed two `checkExpr (EIf ...)` gaps to get this past the type checker
+(condition must accept `#⊤bool`, not bare `bool`; the condition variable must be restored after,
+same as qif does for its own control). Simulation confirms `b` and the flipped qubit always agree.
 
 ### example_copy.qurts-core
 Copy typing (Fig. 16, typing_copy) — copies a reference `&α qbit`, drops the copy, reuses the
@@ -76,9 +74,32 @@ original as a qif control. References are Copy.
 ### example_copy_bool.qurts-core
 Copy typing (Fig. 16, Fig. 14) — copies a bool, drops the copy, returns the original.
 
+### example_copy_alias.qurts-core
+Two references `y`/`z`, both `copy`d from the same `x`, passed into a Toffoli that reads all
+three — exercises `Circuit.hs`'s alias-normalization (two qurts-core variables resolving to the
+one physical qubit).
+
 ### example_leq.qurts-core
 Subtyping, subty_shorten (Fig. 13) — `&α T ≤ &β T` when `β ≤ α`. Copies `x: &α qbit`, coerces
 the copy to `&β qbit` via `as`.
+
+### example_borrow_affine.qurts-core
+Subtyping, subty_borrow_affine (Fig. 13) — borrows an owned `#⊥ qbit` under `γ`, coerces the
+resulting `&γ (#⊥ qbit)` down to `&γ qbit` via `as`, then passes it to a function expecting
+exactly that. Regression test for a bug where `isSubtype` demanded an extra (paper-unjustified)
+condition on the discarded inner lifetime, rejecting this.
+
+### example_meas_any_lifetime.qurts-core
+`typ_meas` (Fig. 5) — measures a `#⊤ qbit` (straight off `[0]()`) with no coercion first.
+Regression test for a bug where `meas`/`U(x)` wrongly required exactly `#⊥ qbit` as input, instead
+of `#𝔞 qbit` for any `𝔞` as the paper's rule actually allows.
+
+### example_lifetime_transitivity.qurts-core
+`typ_fn` (Fig. 8) — declares `alpha <= beta, beta <= gamma` (never `alpha <= gamma` directly) and
+coerces a `#gamma qbit` down to `#alpha qbit`, which needs exactly that derived relation.
+Regression test for a bug where `leq` only checked direct membership in the declared constraint
+set, never its transitive closure, though Fig. 8 explicitly builds A as "the smallest preorder...
+including" those constraints.
 
 ### example_cnot_reinit.qurts-core
 Kengo's qif example from Section 5.1. Type-checks fine — the difficulty is in uncomputation:
@@ -103,45 +124,34 @@ Section 6 — `f(mut x: qbit) -> (qbit, #'static qbit)` translated to qurts-core
 returns both. Mixes linear and always-affine qubits in one return type.
 
 ### example_grover.qurts-core
-Fig. 2 + Appendix A — Grover's algorithm for 3 qubits, marked solution hardcoded as a truth
-table rather than a generic oracle. `oracle` marks `|111⟩` via nested qif (3-input AND);
-`non_zero` marks everything but `|000⟩` (3-input OR) for the diffusion reflection; `phase` is a
-single `[Z]`. The phase is applied as `let tmp1 = phase<alpha1>(tmp1)` — Section 3.1's
-phase-kickback trick, expressed as "drop a `#α` value while `α` is still active" rather than an
-explicit inverse circuit.
+Fig. 2 + Appendix A — Grover's algorithm for 3 qubits, marked solution (`|111⟩`) hardcoded as a
+truth table (`oracle`, `non_zero`) rather than a generic oracle; a direct phase oracle (`[Z]` on
+a search qubit, no ancilla). Simulates to ~94.5% on `|111⟩` over 2000 shots. `&mut qbit` params
+become owned `#⊥ qbit` mutated by shadowing; the loop is manually unrolled.
 
-**Previously a known bug**, found via the uncompute/circuit pipeline: applying the phase as a
-*rebind* put `[Z]` into `tmp1`'s own reversible history, so `Uncompute.hs` reversed `drop tmp1`
-right through it, cancelling the phase (`Z·Z = I`) and simulating to a uniform distribution
-instead of a peak at `|111⟩`. Fixed by teaching `Uncompute.hs` that a diagonal gate (`Z` here)
-never needs to be undone to return a value to `|0⟩` — see `circuit/README.md`'s "Fixed" section
-for the full writeup. Simulating the compiled circuit now confirms the fix: ~94.5% on `|111⟩`
-over 2000 shots.
+### example_grover2.qurts-core
+Same algorithm, via the textbook `|−⟩` phase-kickback ancilla instead: a dedicated qubit prepared
+in `|−⟩` (via bare `H`, which forfeits its own droppability), XORed against by the oracle, and
+disposed of with `meas` rather than `drop` (its own state is never touched by a diagonal phase, so
+nothing needs uncomputing). Simulates to ~938/1000 on `|111⟩`.
 
-Translation notes: `&mut qbit` params become owned `#⊥ qbit` params mutated by shadowing;
-`for _ in 0..2` is manually unrolled; the paper's 3-way destructure becomes two nested pair
-destructures.
+### example_grover_original.qurts-core
+Reconstructed from git history — the *pre-fix* ancilla/phase/drop encoding (temporary boolean
+ancilla, phased via a rebind, then `drop`ped) that the diagonal-gate uncompute fix broke. Kept
+deliberately: it still type-checks and uncomputes, but full/faithful reversal correctly cancels
+its own phase kickback, so it simulates to a *uniform* distribution — a legal, if pointless,
+program (see `uncompute/GateInverse.hs`'s module note).
 
 ### example_grover_amplified.qurts-core
-Not from the paper — amplitude amplification (Brassard–Høyer–Mosca–Tapp 2000) applied to the
-same 3-qubit search. Instead of the paper's fixed 2 iterations, the count is derived from the
-number of marked solutions M: θ = arcsin(√(M/N)), r = round(π/(4θ) − 1/2). This oracle marks
-M=2 solutions (`(x∨y) ∧ (¬x∨¬y) ∧ z`), giving r=1 — one iteration, not two; reusing r=2 would
-over-rotate past the amplitude peak.
-
-`oracle` is built clause by clause (`clause_or2`, `clause_nand2`, `clause_unit`,
-`all_satisfied3`) rather than as one hardcoded truth table, since qif can't return a reference as
-part of its result (Fig. 7: Purely Quantum excludes booleans and references) — each clause has
-to be its own function call, not an inline nested qif sharing scope. `phase`, `non_zero`,
-`grover_diffusion` are reused verbatim from `example_grover.qurts-core`.
-
-Ends by measuring `x`, `y`, `z` and returning three bools — amplitude amplification only makes
-measuring a solution *likely*, not certain. Assumes M is known in advance.
+Not from the paper — amplitude amplification (Brassard–Høyer–Mosca–Tapp 2000): iteration count
+derived from the number of marked solutions (M=2 here, so 1 iteration, not the paper's fixed 2).
+`oracle` is built clause by clause (`clause_or2`, `clause_nand2`, `clause_unit`, `all_satisfied3`)
+since qif can't return a reference (Fig. 7 excludes booleans/references from Purely Quantum), so
+each clause needs its own function call. Ends by measuring and returning three bools.
 
 ### example_grover_amplified2.qurts-core
 `example_grover_amplified` extended to 4 qubits, a unique solution of a 6-clause formula, needing
-3 iterations. Built the same clause-by-clause way, with two more clause helpers (`clause_impl`,
-`clause_or2_neg_second`).
+3 iterations. Two more clause helpers (`clause_impl`, `clause_or2_neg_second`).
 
 ### example_ec_reversal.qurts-core
 Targets uncompute/'s EC reversal, not a language feature. Initializes a qubit at `|0⟩`, flips it
@@ -160,13 +170,33 @@ calls `middle`, which calls `innermost`, whose qif is controlled by a parameter 
 boundaries from its only top-level name. Confirms `renames`/`rcCopies` composition works two
 levels deep, not just one.
 
+### example_qif_pair_return.qurts-core
+Fig. 9's "simulation qif" rule (p. 17-18) explicitly describes `qif p { let t1 = (y,x); t1 } else
+{ let t0 = (x,y); t0 }` as a controlled-swap — a qif whose branches return a *pair*, swapped by
+control. Type-checks fine (nothing in Figs. 5-8/13-17 restricts qif's return type to bool/qbit)
+and needs no uncomputation. Compiles to a single SWAP gate between the two variables' qubits,
+gated on the control (see `circuit/README.md`'s "Fixed: a qif returning a pair" section) — the
+`RKind`/`classifyReturn` machinery previously only handled a branch returning one fresh or
+threaded-through qubit. Simulating gives only the two outcomes a controlled-swap should produce
+(`p=0,a=0,b=1` and `p=1,a=1,b=0`, each ~50%), confirming the fix against Fig. 9's own prediction.
+
 ## Error Examples
 
 Expected to fail type-checking.
 
 ### example_error.qurts-core
-Section 3.1, p. 10–11 — linearity violation. `q` is consumed by the first qif and dropped, then
-borrowed again for a second qif. Error: `UnboundVariable (Var "q")`.
+Inspired by Section 3.1's "uncomputability via types" discussion (p. 10–11), but not a literal
+transcription of it (see `example_uncomputability_error.qurts-core` for that): `q` is consumed by
+the first qif, explicitly dropped while its lifetime is still active, then a second qif tries to
+borrow the now-gone `q`. Error: `UnboundVariable (Var "q")`.
+
+### example_uncomputability_error.qurts-core
+A literal transcription of Section 3.1's actual "uncomputability via types" example (p. 10–11):
+`q` is computed under `&alpha p`, `alpha` is ended, then `q` is borrowed *again* under a fresh
+`beta` to control a second qif, without ever being dropped. Since `q`'s own type is still tagged
+`#alpha qbit` and `alpha` is no longer active, `q` can never be legally dropped again -- it's stuck
+unconsumed at the end of the block, exactly as the paper describes ("q cannot be dropped"). Error:
+`LinearityViolation "Variable not consumed after block: Var \"q\""`.
 
 ### example_freeze_error.qurts-core
 Borrow freeze (typing_letref, Fig. 17) — `r = &α p` freezes `p` for `α`; the program then
@@ -183,3 +213,42 @@ qif PQ restriction (Fig. 16, typing_qif) — a `meas` call inside a qif branch. 
 ### example_qif_call_pq_error.qurts-core
 Same restriction, via a function call — calls a non-PQ function (one containing `meas`) from
 inside a qif branch; the PQ check propagates through calls. Same error as above.
+
+### example_external_endlft_error.qurts-core
+stmt_end_lifetime's `α ∉ A_ex,Π,f` premise (Fig. 16) — tries to `endlft` a lifetime that's the
+function's own signature parameter rather than one it introduced itself with `newlft`. Only the
+caller may end an external lifetime. Error: `"cannot endlft ..."`.
+
+### example_lifetime_restart_error.qurts-core
+Section 3.2.1's own assumption ("a lifetime variable cannot be restarted after it has ended") —
+`newlft`s, `endlft`s, then `newlft`s the same name again. Error: `"...may only ever be used
+once..."`.
+
+### example_lifetime_keyword_error.qurts-core
+`newlft`/`endlft` take a lifetime *variable* (Fig. 3's own footnote), never the special `bot`/`top`
+atoms — those exist only in types (`#top T`). Error: `"'bot' is ... not a variable"`.
+
+### example_ec_arity_error.qurts-core
+`expr_lifted`'s own arity — applies `[cnot]` (a 2-qubit gate) to a single qubit. Regression test
+for a bug where `[c](x)`'s argument shape (single qubit vs. same-lifetime pair) was accepted
+regardless of whether `c` itself was 1- or 2-qubit, so a mismatch type-checked, passed uncompute,
+and only ever crashed `build_circuit.py` with a raw Python `ValueError` at the very last stage.
+
+### example_leq_external_error.qurts-core
+stmt_lft_ineq's own `α, β ∉ A_ex,Π,f` premise (Fig. 16) — `evil_leq<a,b|>` asserts `a <= b;` about
+its *own* external parameters in its body, then coerces accordingly; `example_leq_external_error`
+calls it with two lifetimes actually related the *other* way. Regression test for a genuine
+soundness hole, not just an over-strict rule: expr_function's caller-side check only ever verifies
+a callee's *signature*-declared constraints, never anything asserted in the callee's own body, so
+the caller had no way to see — or refute — the invented relationship. Previously type-checked
+outright; before this fix it was only ever caught by chance, by Uncompute's own defensive
+re-type-check, with a confusing `ReferenceStillInContext` far from the actual mistake.
+
+### example_self_pair_error.qurts-core
+expr_tuple (Fig. 15) — `(x, x)`, the same variable used for both halves of a pair. Regression
+test for a direct no-cloning violation, the most severe bug found this session: `checkExpr (EPair
+x0 x1)` looked both variables up *before* removing either, so `x0 == x1` silently passed both
+lookups while the variable was still Active both times. Confirmed end to end: `let p = (x,x); let
+(a,b) = p; ...meas both...` compiled to a circuit with *one* physical qubit measured twice,
+reported as two independent qubits — perfectly correlated 00/11 results, never 01/10, over 1000
+shots.

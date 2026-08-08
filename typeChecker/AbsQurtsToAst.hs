@@ -4,7 +4,6 @@ import qualified QurtsGrammar.Abs as B
 import Ast
 
 import qualified Data.Set as Set
-import qualified Data.Map as Map
 import Data.Text (Text, pack)
 
 -- ============================================================

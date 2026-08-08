@@ -88,7 +88,7 @@ prettySimpleStmt (SNewLft a)      = "newlft " ++ lifetime a
 prettySimpleStmt (SEndLft a)      = "endlft " ++ lifetime a
 prettySimpleStmt (SLeq a b)       = lifetime a ++ " <= " ++ lifetime b
 prettySimpleStmt (SAs x ty)       = var x ++ " as " ++ prettyType ty
-prettySimpleStmt (SLetRef y a x)  = "let " ++ var y ++ " = &" ++ lifetime a ++ " " ++ var x
+prettySimpleStmt (SLetRef y a x)  = "let " ++ var y ++ " = & " ++ lifetime a ++ " " ++ var x
 prettySimpleStmt (SLetExpr y e)   = "let " ++ var y ++ " = " ++ prettyExpr e
 prettySimpleStmt (SLetPair y0 y1 x) = "let (" ++ var y0 ++ ", " ++ var y1 ++ ") = " ++ var x
 prettySimpleStmt (SDrop x)        = "drop " ++ var x
@@ -105,12 +105,18 @@ prettyBlock :: Block -> String
 prettyBlock (Block stmt ret) =
   "{\n" ++ indent (intercalate " ;\n" (map prettySimpleStmt (flattenStmt stmt)) ++ " ;\n" ++ var ret) ++ "}"
 
+-- Cosmetic only (whitespace is insignificant to the grammar either way),
+-- but an empty params/constraints list used to print as "<  |  >" (double
+-- spaces either side of "|") rather than "< | >" -- padWith avoids that by
+-- only inserting a space next to a genuinely non-empty list.
 prettyLifetimeContext :: LifetimePreorder -> String
 prettyLifetimeContext lp =
-  "< " ++ intercalate ", " (map lifetime (ltParams lp))
-    ++ " | " ++ intercalate ", " (map prettyConstraint (Set.toList (ltRel lp))) ++ " >"
+  "<" ++ padWith (map lifetime (ltParams lp))
+    ++ "|" ++ padWith (map prettyConstraint (Set.toList (ltRel lp))) ++ ">"
   where
     prettyConstraint (a, b) = atom a ++ " <= " ++ atom b
+    padWith []  = " "
+    padWith xs  = " " ++ intercalate ", " xs ++ " "
 
 prettySignature :: Signature -> String
 prettySignature sig =

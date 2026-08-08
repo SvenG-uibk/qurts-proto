@@ -1,0 +1,4 @@
+fn example_lifetime_transitivity < alpha , beta , gamma | alpha <= beta , beta <= gamma > (x : # gamma qbit) -> # alpha qbit {
+    x as # alpha qbit ;
+    x
+}

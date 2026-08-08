@@ -3,7 +3,7 @@ fn measure_qubit < | > (x : # bot qbit) -> # top bool {
     b
 } ;
 
-fn example_qif_call_pq_error < alpha | > (p : # bot qbit) -> # top bool {
+fn example_qif_call_pq_error < | > (p : # bot qbit) -> # top bool {
     let q = [0]() ;
     newlft alpha ;
     let r = &alpha q ;

@@ -1,4 +1,4 @@
-fn example_freeze_error < alpha | > (p : # bot qbit) -> # bot qbit {
+fn example_freeze_error < | > (p : # bot qbit) -> # bot qbit {
     newlft alpha ;
     let r = &alpha p ;
     let q = p ;

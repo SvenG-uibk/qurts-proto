@@ -31,7 +31,7 @@ silently. Exits 0 regardless of SKIP count — partial coverage is expected, not
 
 ## Coverage
 
-18 of 23 non-`_error` examples uncompute successfully. Handled:
+25 of 30 non-`_error` examples uncompute successfully. Handled:
 
 - `EU`/`EC` gate chains on a single tracked value, back to `[0]()`.
 - bare renames, `&borrow`s, `copy`/`true`/`false`/`()`/`meas(_)`, pair-destructure of a literal pair.
@@ -61,4 +61,4 @@ Not handled:
 
 Both of the last two need the same pebble-game machinery — a shared circuit graph tracked across
 branches/pairs, not the per-chain `Origin` values this pass uses everywhere else. This is why 5
-of 23 examples stay `SKIP`.
+of 30 examples stay `SKIP`.

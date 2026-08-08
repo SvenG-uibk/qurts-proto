@@ -1,0 +1,25 @@
+fn example_qif_pair_return < | > () -> # top bool * # top bool * # top bool {
+    let x = [0]() ;
+    let y = [1]() ;
+    let p0 = [0]() ;
+    let p = H(p0) ;
+    newlft alpha ;
+    let r = & alpha p ;
+    let pair = qif r {
+        let t1 = (y, x) ;
+        t1
+    } else {
+        let t0 = (x, y) ;
+        t0
+    } ;
+    pair as # alpha qbit * # alpha qbit ;
+    let (a, b) = pair ;
+    drop r ;
+    endlft alpha ;
+    let rp = meas(p) ;
+    let ra = meas(a) ;
+    let rb = meas(b) ;
+    let rpa = (rp, ra) ;
+    let result = (rpa, rb) ;
+    result
+}

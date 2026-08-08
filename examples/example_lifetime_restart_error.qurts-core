@@ -1,0 +1,8 @@
+fn example_lifetime_restart_error < | > () -> # top bool {
+    newlft alpha ;
+    endlft alpha ;
+    newlft alpha ;
+    endlft alpha ;
+    let b = true ;
+    b
+}

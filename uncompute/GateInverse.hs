@@ -34,12 +34,26 @@
 -- -|1>) -- Unqomp's own algorithm would refuse to auto-reverse Z at all,
 -- the same way it refuses H, and its own paper states plainly that Grover's
 -- phase kickback is "built by hand, entirely outside" their automatic
--- machinery. Consequently example_grover.qurts-core no longer computes its
--- oracle's phase via a temporary ancilla that gets dropped through a
--- tracked Z; it applies Z directly to one search-register qubit, controlled
--- by the others via qif (a direct phase oracle, no ancilla, nothing to
--- reverse at all) -- see that file for the restructuring.
-module GateInverse (unitaryInverse, classicalInverse, isKnownClassicalInjection) where
+-- machinery. example_grover.qurts-core and example_grover2.qurts-core don't
+-- rely on this any more -- they compute their oracle's phase without ever
+-- dropping a value that a diagonal gate was applied to (see those files) --
+-- but example_grover_original.qurts-core deliberately still does, kept
+-- around specifically to demonstrate that this is legal: it type-checks,
+-- uncomputes, and runs, it just gives a uniform (not peaked) distribution,
+-- because full reversal faithfully -- and correctly -- undoes its own phase
+-- kickback along with everything else. That's the type checker doing its
+-- actual job (guaranteeing dropping a value is sound) and nothing more; it
+-- is not this system's job to reject a well-typed program for computing
+-- something pointless. A real fix -- deciding, case by case, whether a
+-- given diagonal gate in a given drop's history is safe to leave un-reversed
+-- without destroying an intended effect elsewhere -- needs information this
+-- module doesn't have (see isKnownClassicalInjection's own note) and
+-- belongs at a different layer entirely: wherever a `drop`'s reversal is
+-- actually scheduled/inserted, which is the same "naive strategy only, not
+-- the paper's full pebble-game flexibility" boundary uncompute/Uncompute.hs
+-- already documents as future work, not something to improvise here as a
+-- gate-table lookup.
+module GateInverse (unitaryInverse, classicalInverse, isKnownClassicalInjection, isTwoQubitClassical) where
 
 import Ast (Unitary (..), Classical (..))
 import qualified Data.Map.Strict as Map
@@ -74,17 +88,37 @@ unitaryInverse :: Unitary -> Maybe Unitary
 unitaryInverse (Unitary name) = Unitary <$> Map.lookup name unitaryInverseTable
 
 -- Table of named classical injections used via EC ([c](x)-style syntax,
--- Section 3.1's "Lifted functions") and their inverses. Restricted to
--- exactly the ones the paper names explicitly -- Section 3.1: "[not] is a
--- 1-qubit lifted function which represents the X-gate, [cnot] is a 2-qubit
--- lifted function which represents the controlled-X gate, and [swap] is a
--- 2-qubit lifted function which represents the swap gate" -- i.e. genuine
--- lifts of a classical Boolean injective function: |i>|k> -> |i>|f(k)>
--- with coefficient exactly 1, no phase at all (Unqomp's own qfree
--- definition, cited in the module note below). A phase gate like Z does
--- NOT satisfy that definition (Z|1> = -|1>, not |1>) even though it has a
--- perfectly well known inverse -- see the module-level note for why it was
--- removed from here rather than kept as a "known-inverse" convenience.
+-- Section 3.1's "Lifted functions") and their inverses. The paper names
+-- not/cnot/swap explicitly here -- Section 3.1: "[not] is a 1-qubit lifted
+-- function which represents the X-gate, [cnot] is a 2-qubit lifted function
+-- which represents the controlled-X gate, and [swap] is a 2-qubit lifted
+-- function which represents the swap gate" -- but the table also includes
+-- the rest of the diagonal family (I, Z, S, Sdg, T, Tdg), none of which are
+-- "classical Boolean injective functions" in that literal sense (they're
+-- phase gates: Z|1> = -|1>, not a bit permutation at all).
+--
+-- The diagonal gates were briefly removed from here on the reasoning that
+-- admission to EC should be restricted to Unqomp's qfree criterion
+-- (coefficient exactly 1, no phase). That conflated two different
+-- questions: "is dropping a value built from this gate sound" and "does
+-- the gate happen to look like a classical function". The former is what
+-- the type checker actually needs to guarantee, and it's answered entirely
+-- by two things this module already does regardless of what's diagonal or
+-- classical: (a) Uncompute.hs now reverses every gate fully and faithfully,
+-- which is sound for *any* gate with a correctly recorded inverse, diagonal
+-- or not (see the module-level note); and (b) a name with no entry in this
+-- table fails loudly at uncompute time ("no known inverse for..."), never
+-- silently -- see classicalInverse's own Nothing-means-unknown policy just
+-- below. Given both of those, restricting *which* correctly-invertible gate
+-- names are admissible is not a soundness question any more, and enforcing
+-- it in the type checker rejects well-typed, faithfully-uncomputable
+-- programs for a reason that no longer applies -- Qurts's type system is
+-- not in the business of judging whether a program's phase games add up to
+-- something useful, only whether dropping a value is safe. The whole
+-- diagonal family is back for that reason (see the module-level note for
+-- what a real fix -- one that actually distinguishes "safe to leave
+-- un-reversed" from "would destroy an intended effect" -- would need, and
+-- why it doesn't belong here).
 -- Same Nothing-means-unknown policy as unitaryInverseTable: a classical
 -- injection can be an arbitrary user-defined bijection over bits, so
 -- returning Nothing (rather than guessing self-inverse) for any name not
@@ -102,35 +136,66 @@ unitaryInverse (Unitary name) = Unitary <$> Map.lookup name unitaryInverseTable
 -- depending only on whether it happened to sit under a qif in that
 -- particular program, with no semantic difference at all. One name removes
 -- that inconsistency at the source instead of explaining it away.
-classicalInverseTable :: Map.Map Text Text
-classicalInverseTable = Map.fromList $ map (\(a, b) -> (pack a, pack b))
-  [ ("X",    "X")
-  , ("cnot", "cnot")
-  , ("swap", "swap")
+-- Each entry carries its own arity (1 or 2 qubits) alongside its inverse
+-- name, rather than arity living in a second, separately-maintained list
+-- -- that used to be exactly this table's own shape (Map Text Text, no
+-- arity at all), with a *different* list (isTwoQubitClassical, added
+-- later to fix the arity-mismatch bug below) tracking which names were
+-- 2-qubit. Two lists that both have to be updated in step for every gate
+-- is precisely the kind of thing that silently goes stale the next time
+-- someone adds a gate here and forgets the other one -- which is exactly
+-- how [c](x)'s own arity went unchecked in the first place (see
+-- isTwoQubitClassical's own history). One table, one place to update.
+classicalInverseTable :: Map.Map Text (Text, Int)
+classicalInverseTable = Map.fromList $ map (\(a, b, n) -> (pack a, (pack b, n)))
+  [ ("X",    "X",    1)
+  , ("cnot", "cnot", 2)
+  , ("swap", "swap", 2)
+  , ("I",    "I",    1)
+  , ("Z",    "Z",    1)
+  , ("S",    "Sdg",  1)
+  , ("Sdg",  "S",    1)
+  , ("T",    "Tdg",  1)
+  , ("Tdg",  "T",    1)
   ]
 
 -- | Look up the inverse of a named classical injection. Same Nothing-means-
 -- unknown policy as 'unitaryInverse'.
 classicalInverse :: Classical -> Maybe Classical
-classicalInverse (Classical name) = Classical <$> Map.lookup name classicalInverseTable
+classicalInverse (Classical name) = Classical . fst <$> Map.lookup name classicalInverseTable
 
 -- | Whether `c` is one of the gate names TypeChecker.hs's EC rule (`[c](x)`)
 -- is allowed to accept at all. This is the *same* set as classicalInverseTable's
 -- keys, by construction (see 'classicalInverse') -- kept as an explicit,
 -- separately-named predicate (rather than just `isJust . classicalInverse`)
 -- so the intent at the call site (TypeChecker.hs's checkExpr(EC c x)) reads
--- as "is c a legitimate classical injection", not "do we happen to have an
--- inverse for it". Closes a real gap: without this check, `[c](x)` type-checked
--- for *any* identifier c, including a genuinely basis-mixing gate name like
--- "H" -- accepted by the type rule (preserving droppability, exactly like
--- [X]), and only ever caught downstream, by accident, when Uncompute.hs's
--- classicalInverse lookup failed to find an entry for it. That protection
--- depended entirely on this table happening to be small; any future
--- addition of a non-injective gate name to classicalInverseTable (e.g.
--- someone adding a phase gate because "it's self-inverse, that's enough")
--- would have silently reintroduced exactly that hole. Tying admission to
--- the type checker itself, off the same source of truth this module already
--- maintains, makes "coincidentally not typo'd into the table" no longer the
+-- as "is c a name this module has a verified inverse for", which is now the
+-- *entire* criterion (see classicalInverseTable's own note on why "is c a
+-- classical Boolean function specifically" was the wrong question to be
+-- asking). This still means an arbitrary typo or an unrecognised gate name
+-- (e.g. "H", which has no entry here -- only in unitaryInverseTable, EU's
+-- own table) is rejected at type-check time rather than surfacing later as
+-- an uncompute-time failure; the difference from before is only that
+-- membership in classicalInverseTable is no longer curated down to "true"
+-- classical injections; it's curated down to "gates we've actually verified
+-- the inverse of". Tying admission to the type checker itself, off the same
+-- source of truth this module already maintains, makes "coincidentally not
+-- typo'd into the table" no longer the
 -- thing standing between a well-typed program and a miscompiled one.
 isKnownClassicalInjection :: Classical -> Bool
 isKnownClassicalInjection (Classical name) = name `Map.member` classicalInverseTable
+
+-- | Whether `c` names a genuinely 2-qubit classical injection (cnot, swap)
+-- rather than a 1-qubit one (X, I, Z, S, Sdg, T, Tdg) -- read directly off
+-- classicalInverseTable's own arity field (see its note on why that's a
+-- single table now, not this plus a second list). TypeChecker.hs's
+-- checkExpr(EC c x) uses this to require the *matching* argument shape (a
+-- single qubit for a 1-qubit name, a same-lifetime pair for a 2-qubit
+-- one) -- previously unchecked at all, so `[cnot](q)` on a single qubit,
+-- or `[X](p)` on a pair, both type-checked and passed uncompute, only
+-- ever failing at the very last stage as a raw Python ValueError out of
+-- build_circuit.py's own arity check ("gate cnot wants 2 targets, got 1"),
+-- confirmed empirically -- never a clean error anywhere in the Haskell
+-- pipeline that's supposed to catch exactly this kind of mistake first.
+isTwoQubitClassical :: Classical -> Bool
+isTwoQubitClassical (Classical name) = fmap snd (Map.lookup name classicalInverseTable) == Just 2

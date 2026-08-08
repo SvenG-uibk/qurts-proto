@@ -5,12 +5,14 @@
 -- Handles [0]()/[1]() allocation, EU/EC gate applications on single qubits
 -- or literal pairs, renames, &borrows, meas, pairs and their destructure,
 -- the no-op statements (drop/as/newlft/endlft/noop), entry parameters, qif
--- (-> controlled gates), classical if on a statically-known condition
--- (-> static branch selection), classical if on a dynamic/measured
--- condition (-> classically-conditioned gates, Qiskit if_test -- restricted
--- to the same RFresh/RInput branch shape as qif), and function call
+-- (-> controlled gates, including a branch returning a fresh/threaded qubit
+-- or a pair thereof -- RFresh/RInput/RPair, Fig. 9's controlled-swap),
+-- classical if on a statically-known condition (-> static branch
+-- selection), classical if on a dynamic/measured condition (->
+-- classically-conditioned gates, Qiskit if_test -- restricted to the
+-- narrower RFresh/RInput branch shape, no RPair yet), and function call
 -- inlining. What's left (anything the uncomputation pass itself can't
--- handle, or a qif/classical-if branch outside that restricted shape) is
+-- handle, or a qif/classical-if branch outside its own supported shape) is
 -- left to fail loudly (Left) rather than silently miscompile -- a wrong
 -- circuit has no type checker to catch it downstream, so every unhandled
 -- construct must announce itself. See circuit/README.md's "Current
@@ -35,7 +37,7 @@ import Ast
 import PrettyAst (flattenStmt)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, unpack, pack)
-import Data.List (intercalate)
+import Data.List (intercalate, sort, findIndex)
 
 -- | Where a variable's qubits live, keeping pair structure intact.
 data LocTree
@@ -275,14 +277,15 @@ compileCall ctrls st y fname args =
       retTree <- lookupTree stBody (blockRet body)
       Right (stBody { csEnv = Map.insert y retTree callerEnv })
 
--- | How a qif branch produces its (single-qubit) return value: either by
--- threading a pre-existing outer variable through in place (RInput,
--- possibly gated -- the my_cnot `[X](q)` / `noop; q` shape), or by
--- building a brand-new qubit (RFresh -- the `let z=[1](); z` shape). Both
--- branches of one qif must agree on which; a mismatch (or anything more
--- structured -- a nested qif, pair, call, or meas in the branch) is left
--- for a later increment and fails loudly.
-data RKind = RFresh | RInput Var | ROther
+-- | How a qif branch produces its return value: either by threading a
+-- pre-existing outer variable through in place (RInput, possibly gated --
+-- the my_cnot `[X](q)` / `noop; q` shape), by building a brand-new qubit
+-- (RFresh -- the `let z=[1](); z` shape), or by pairing up two
+-- independently-classified sub-values (RPair -- the `let t=(y,x); t`
+-- shape, Fig. 9's controlled-swap). Both branches of one qif must agree on
+-- shape (RPair with RPair, recursively); anything else (a nested qif, call,
+-- or meas in the branch) is left for a later increment and fails loudly.
+data RKind = RFresh | RInput Var | RPair RKind RKind | ROther
   deriving (Eq, Show)
 
 -- | Classify a branch by tracing its return variable back through the
@@ -291,7 +294,8 @@ data RKind = RFresh | RInput Var | ROther
 -- inherits its source's kind (a gate is in-place, so it keeps the
 -- location); one bound by a nested qif recursively unifies that qif's two
 -- branches (a nested qif building fresh qubits is itself fresh -- this is
--- how a Toffoli-shaped `qif x { qif y {...} } else {...}` classifies);
+-- how a Toffoli-shaped `qif x { qif y {...} } else {...}` classifies); one
+-- bound by pairing two names classifies as RPair of their own kinds;
 -- anything else is ROther.
 classifyReturn :: Block -> RKind
 classifyReturn (Block stmt ret) =
@@ -306,6 +310,7 @@ classifyReturn (Block stmt ret) =
       SLetExpr v (EC _ w)      -> Map.insert v (kindOf m w) m
       SLetExpr v (EVar w)      -> Map.insert v (kindOf m w) m
       SLetExpr v (ECopy w)     -> Map.insert v (kindOf m w) m
+      SLetExpr v (EPair a b)   -> Map.insert v (RPair (kindOf m a) (kindOf m b)) m
       SLetExpr v (EQIf _ b1 b2) -> Map.insert v (unifyKind (classifyReturn b1)
                                                            (classifyReturn b2)) m
       SLetExpr v _             -> Map.insert v ROther m
@@ -315,11 +320,12 @@ classifyReturn (Block stmt ret) =
 
 -- | Combine the two branch kinds of a nested qif into the kind of its own
 -- result: both-fresh is fresh, both-threading-the-same-input is that input,
--- anything else is unhandled.
+-- both-pairs recurses component-wise, anything else is unhandled.
 unifyKind :: RKind -> RKind -> RKind
 unifyKind RFresh RFresh = RFresh
 unifyKind (RInput a) (RInput b)
   | a == b    = RInput a
+unifyKind (RPair a1 a2) (RPair b1 b2) = RPair (unifyKind a1 b1) (unifyKind a2 b2)
 unifyKind _ _ = ROther
 
 -- | Compile `let y = qif ctrl { Bt } else { Bf }`. Both branches are
@@ -357,21 +363,37 @@ compileQifCore ctrls mTarget st ctrl bt bf = do
   let env0 = csEnv st
   (rTree, st1) <- case mTarget of
     Just t  -> Right (t, st)
-    Nothing -> case (classifyReturn bt, classifyReturn bf) of
-      (RInput a, RInput b) -> do
-        la <- singleLeaf st a
-        lb <- singleLeaf st b
-        if la == lb
-          then Right (LLeaf la, st)
-          else Left "circuit: qif branches thread different locations, not handled yet"
-      (RFresh, RFresh) ->
-        let (q, st') = allocQubit False st in Right (LLeaf q, st')
-      (kt, kf) -> Left ("circuit: qif branches with return kinds "
-                         ++ show kt ++ "/" ++ show kf ++ " not handled yet")
+    Nothing -> resolveTarget st (classifyReturn bt) (classifyReturn bf)
   st2 <- compileBranchOnto (ctrls ++ [(ctrlLoc, True)])  rTree st1 bt
   let st2' = st2 { csEnv = env0 }
   st3 <- compileBranchOnto (ctrls ++ [(ctrlLoc, False)]) rTree st2' bf
   Right (st3 { csEnv = env0 }, rTree)
+
+-- | Choose a shared result location for a qif's two branches from their
+-- RKind classification, recursing into RPair component-wise (Fig. 9's
+-- controlled-swap needs one location per pair component, not one for the
+-- whole pair). RFresh/RFresh allocates one fresh qubit per position;
+-- RInput/RInput picks the *then*-branch's own location for that position --
+-- arbitrarily, since compileBranchOnto's `alignTo` corrects whichever
+-- branch's own natural order doesn't already match, via a swap gated on
+-- that same branch's own control. That correction is what lets a false
+-- branch threading a genuinely *different* physical qubit for that
+-- position (previously rejected outright) work instead of failing.
+-- Anything else is left unhandled, matching the pre-existing scope
+-- boundary (a nested qif, call, or meas inside a branch).
+resolveTarget :: CState -> RKind -> RKind -> Either String (LocTree, CState)
+resolveTarget st kt kf = case (kt, kf) of
+  (RInput a, RInput _) -> do
+    la <- singleLeaf st a
+    Right (LLeaf la, st)
+  (RFresh, RFresh) ->
+    let (q, st') = allocQubit False st in Right (LLeaf q, st')
+  (RPair kt1 kt2, RPair kf1 kf2) -> do
+    (l1, st1) <- resolveTarget st  kt1 kf1
+    (l2, st2) <- resolveTarget st1 kt2 kf2
+    Right (LNode l1 l2, st2)
+  (kt', kf') -> Left ("circuit: qif branches with return kinds "
+                       ++ show kt' ++ "/" ++ show kf' ++ " not handled yet")
 
 singleLeaf :: CState -> Var -> Either String Int
 singleLeaf st v = do
@@ -385,18 +407,46 @@ singleLeaf st v = do
 -- redirected onto rTree (which is pre-allocated |0>, so [0] is a no-op and
 -- [1] is a controlled X); an in-place gate applies to its argument's
 -- existing location. Fails loudly on anything not in the small shape this
--- first version handles.
+-- first version handles. The final `alignTo` corrects a return that carries
+-- the right qubits but in the wrong order (Fig. 9's controlled-swap) rather
+-- than requiring an exact match.
 compileBranchOnto :: [(Int, Bool)] -> LocTree -> CState -> Block
                   -> Either String CState
 compileBranchOnto ctrls rTree st (Block stmt ret) = do
   st' <- go st (flattenStmt stmt)
   tret <- lookupTree st' ret
-  if leaves tret == leaves rTree
-    then Right st'
-    else Left "circuit: qif branch return did not land on the shared result location"
+  alignTo ctrls tret rTree st'
   where
     go s []       = Right s
     go s (x : xs) = compileBranchStmt ctrls rTree s x >>= \s' -> go s' xs
+
+-- | Correct a branch's own naturally-computed return tret onto the shared
+-- target rTree. Equal already: nothing to do. Same qubits, different
+-- order: the branch built a pair in the "wrong" order relative to the
+-- other branch (e.g. `let t1 = (y,x)` against the other branch's `(x,y)`)
+-- -- fix it with a sequence of SWAP gates, each gated on this branch's own
+-- `ctrls` alone, so the correction only ever touches this branch's own
+-- amplitude component of the superposition, never the other branch's.
+-- Anything else (a different qubit set entirely) is a genuine shape
+-- mismatch, rejected as before.
+alignTo :: [(Int, Bool)] -> LocTree -> LocTree -> CState -> Either String CState
+alignTo ctrls tret rTree st
+  | cur == target           = Right st
+  | sort cur == sort target = Right (go cur st)
+  | otherwise               = Left "circuit: qif branch return did not land on the shared result location"
+  where
+    cur    = leaves tret
+    target = leaves rTree
+    go xs s = case findIndex (\i -> xs !! i /= target !! i) [0 .. length xs - 1] of
+      Nothing -> s
+      Just i  ->
+        let want   = target !! i
+            Just j = findIndex (== want) xs
+            xs'    = swapAt i j xs
+        in go xs' (emitGate packSwap [xs !! i, xs !! j] ctrls [] s)
+    swapAt i j xs =
+      [ if k == i then xs !! j else if k == j then xs !! i else xs !! k
+      | k <- [0 .. length xs - 1] ]
 
 compileBranchStmt :: [(Int, Bool)] -> LocTree -> CState -> Stmt
                   -> Either String CState
@@ -410,9 +460,18 @@ compileBranchStmt ctrls rTree st stmt = case stmt of
   SAs _ _      -> Right st
   SDrop _      -> Right st
   SLetRef y _ x -> do t <- lookupTree st x; Right (bind y t st)
-  SLetExpr y EInit0 -> Right (bind y rTree st)               -- redirect fresh init to shared |0>
-  SLetExpr y EInit1 ->                                        -- ... and a [1] is a controlled X onto it
-    Right (bind y rTree (emitGate packX (leaves rTree) ctrls [] st))
+  -- Redirecting straight onto rTree only makes sense when rTree is a
+  -- single qubit -- when it's pair-shaped (RPair, see resolveTarget), a
+  -- fresh init inside the branch is only ever meant to become *one*
+  -- component of the eventual pair, not the whole shared location. Not
+  -- handled yet: fail loudly rather than silently binding to the wrong
+  -- qubits.
+  SLetExpr y EInit0 -> case rTree of
+    LLeaf _ -> Right (bind y rTree st)
+    _       -> Left "circuit: qif branch builds a fresh qubit inside a pair-shaped result, not handled yet"
+  SLetExpr y EInit1 -> case rTree of
+    LLeaf _ -> Right (bind y rTree (emitGate packX (leaves rTree) ctrls [] st))
+    _       -> Left "circuit: qif branch builds a fresh qubit inside a pair-shaped result, not handled yet"
   SLetExpr y (EU (Unitary name) x) -> do
     q <- singleLeaf st x
     Right (bind y (LLeaf q) (emitGate name [q] ctrls [] st))
@@ -421,6 +480,13 @@ compileBranchStmt ctrls rTree st stmt = case stmt of
     Right (bind y t (emitGate name (leaves t) ctrls [] st))
   SLetExpr y (EVar x)  -> do t <- lookupTree st x; Right (bind y t st)
   SLetExpr y (ECopy x) -> do t <- lookupTree st x; Right (bind y t st)
+  -- A pair built from two already-located values (RInput/RInput, or a
+  -- gated/renamed value thereof) -- just groups their existing locations,
+  -- no gate needed, matching EPair's own no-op semantics at the type level.
+  SLetExpr y (EPair a b) -> do
+    ta <- lookupTree st a
+    tb <- lookupTree st b
+    Right (bind y (LNode ta tb) st)
   -- A nested qif whose result is this branch's own contribution: build it
   -- onto the same shared result (rTree), threading the accumulated controls
   -- down so its gates end up multiply-controlled (the Toffoli shape -- see
@@ -436,6 +502,11 @@ compileBranchStmt ctrls rTree st stmt = case stmt of
 -- controlled bit-flip on the shared result location.
 packX :: Text
 packX = pack "X"
+
+-- | The SWAP gate name, for correcting a branch's pair-return order onto
+-- the shared result location (see alignTo).
+packSwap :: Text
+packSwap = pack "swap"
 
 -- | Compile `let y = if ctrl { Bt } else { Bf }` where ctrl is a *dynamic*
 -- (measured) bool, resolved by the EIf case above to its classical-bit

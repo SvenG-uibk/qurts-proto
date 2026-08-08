@@ -1,0 +1,4 @@
+fn example_self_pair_error < | > (x : # bot qbit) -> # bot qbit * # bot qbit {
+    let p = (x, x) ;
+    p
+}

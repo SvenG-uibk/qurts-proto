@@ -7,7 +7,7 @@ import System.FilePath    ( takeFileName, (</>) )
 import System.Process     ( createProcess, proc, CreateProcess (..), StdStream (..)
                            , waitForProcess )
 import System.IO          ( hClose, hPutStr )
-import Control.Exception  ( try, IOException )
+import Control.Exception  ( try, IOException, evaluate )
 import Data.List          ( isSuffixOf, isPrefixOf, isInfixOf, sort, intercalate )
 import Control.Monad      ( when )
 
@@ -58,10 +58,26 @@ usage = do
 die :: String -> IO a
 die msg = putStrLn ("ERROR: " ++ msg) >> exitFailure
 
+-- | readFile, but reporting a missing/unreadable file the same clean way
+-- every other failure in this tool is reported, instead of leaking a raw
+-- GHC IOException with a full HasCallStack backtrace -- confirmed
+-- empirically, `qurts -check nonexistent.qurts-core` used to crash like
+-- that. readFile itself is lazy (it may not actually touch the file until
+-- the string it returns is forced), so the exception can't just be caught
+-- around the readFile call -- `evaluate (length s)` forces the whole
+-- string (and so the whole read) *inside* the try, where it can actually
+-- be caught.
+readFileOrDie :: FilePath -> IO String
+readFileOrDie path = do
+  result <- try (readFile path >>= \s -> evaluate (length s) >> return s) :: IO (Either IOException String)
+  case result of
+    Right contents -> return contents
+    Left ex        -> die ("could not read " ++ path ++ ": " ++ show ex)
+
 -- | Parse only -- lex, parse, print BNFC pretty print and our AST.
 parseFile :: FilePath -> IO ()
 parseFile file = do
-  contents <- readFile file
+  contents <- readFileOrDie file
   case pProgram (myLexer contents) of
     Left err -> die ("parse error: " ++ err)
     Right bnfcTree -> do
@@ -75,7 +91,7 @@ parseFile file = do
 -- | Parse then type check.
 checkFile :: FilePath -> IO ()
 checkFile file = do
-  contents <- readFile file
+  contents <- readFileOrDie file
   case pProgram (myLexer contents) of
     Left err -> die ("parse error: " ++ err)
     Right bnfcTree -> do
@@ -93,7 +109,7 @@ checkFile file = do
 -- and this is the cheapest place to catch it).
 uncomputeFile :: FilePath -> IO ()
 uncomputeFile file = do
-  contents <- readFile file
+  contents <- readFileOrDie file
   case pProgram (myLexer contents) of
     Left err -> die ("parse error: " ++ err)
     Right bnfcTree -> do
@@ -124,7 +140,7 @@ uncomputeFile file = do
 -- (see showCircuit).
 runPipeline :: Bool -> Bool -> FilePath -> IO ()
 runPipeline verbose simulate file = do
-  contents <- readFile file
+  contents <- readFileOrDie file
   case pProgram (myLexer contents) of
     Left err -> die ("parse error: " ++ err)
     Right bnfcTree -> do
@@ -145,11 +161,28 @@ runPipeline verbose simulate file = do
               when verbose $ do
                 putStrLn "=== Uncomputed ==="
                 putStrLn (prettyProgram unc)
-              case compileProgram unc of
-                Left err -> die ("circuit compilation failed: " ++ err)
-                Right circ -> do
-                  when verbose $ putStrLn "=== Circuit ==="
-                  showCircuit simulate circ
+              -- Re-type-check the reconstructed program before trusting it
+              -- enough to compile/run: uncomputeFile (-uncompute) already
+              -- does this (its own "correctness check... before trusting
+              -- it"), but this path -- the *default* invocation, -v, and
+              -- -simulate -- didn't, meaning a bug in Uncompute.hs that
+              -- produced a structurally-valid but ill-typed reconstruction
+              -- could have compiled and *run* silently, with no error at
+              -- all, since Circuit.hs's own checks are structural (do the
+              -- locations line up), not a full type-check. Confirmed this
+              -- was a real gap, not just a hypothetical one: -test's own
+              -- per-file check (testFile, below) had the identical
+              -- omission, so its "circuit: OK" column was never actually
+              -- backed by this verification either -- only -uncompute's
+              -- own dedicated path was checking it, for the *same*
+              -- programs -test and this path also process.
+              case checkProgram unc of
+                Left err -> die ("uncomputed output failed to re-type-check (bug in Uncompute): " ++ show err)
+                Right () -> case compileProgram unc of
+                  Left err -> die ("circuit compilation failed: " ++ err)
+                  Right circ -> do
+                    when verbose $ putStrLn "=== Circuit ==="
+                    showCircuit simulate circ
 
 -- | Render a compiled Circuit the way Qiskit itself represents it: pipe our
 -- flat IR into circuit/build_circuit.py (over stdin, via its "-" filename)
@@ -266,7 +299,7 @@ testFile file = do
   let expectError  = "_error" `isInfixOf` file
       base         = take (length file - length ".qurts-core") file
       expectedFile = base ++ ".expected"
-  contents <- readFile file
+  contents <- readFileOrDie file
   case pProgram (myLexer contents) of
     Left err -> return (TestRow file expectError False ("FAIL (parse error: " ++ err ++ ")") StageNA StageNA)
     Right bnfcTree -> do
@@ -288,11 +321,21 @@ testFile file = do
           | expectError ->
               return (TestRow file expectError False "FAIL (expected to fail but succeeded)" StageNA StageNA)
           | otherwise -> do
+              -- Re-type-check the uncomputed program before trusting it
+              -- enough to compile -- see runPipeline's identical addition
+              -- for why: this UNCOMPUTE/CIRCUIT column pair used to report
+              -- "OK" off of nothing stronger than "didn't return an error",
+              -- the same gap runPipeline had, for the exact same programs.
+              -- A re-type-check failure here means Uncompute.hs produced
+              -- ill-typed output, so it's reported as an uncompute failure
+              -- (circuit was never legitimately reachable), not a circuit one.
               let (uncStage, circStage) = case uncomputeProgram ast of
                     Left err  -> (StageFail err, StageNA)
-                    Right unc -> case compileProgram unc of
-                      Left err -> (StageOK, StageFail err)
-                      Right _  -> (StageOK, StageOK)
+                    Right unc -> case checkProgram unc of
+                      Left err -> (StageFail ("reconstructed program failed to re-type-check (bug in Uncompute): " ++ show err), StageNA)
+                      Right () -> case compileProgram unc of
+                        Left err -> (StageOK, StageFail err)
+                        Right _  -> (StageOK, StageOK)
               return (TestRow file expectError True "PASS" uncStage circStage)
 
 -- | Render the table: FILE, RESULT and UNCOMPUTE are column-aligned, padded

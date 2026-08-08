@@ -10,10 +10,13 @@
 -- Files with "_error" in their name are skipped without comment: those are
 -- deliberately not supposed to type check, so there is nothing to uncompute.
 -- Everything else that fails is reported with the pipeline stage it failed
--- at and the reason, rather than silently dropped -- most of the current
--- examples are expected to fail inside Uncompute itself, since the pass
--- only reverses drops whose entire definition chain is EU/copy/bool/unit,
--- not qif, calls, pairs, or classical injections yet (see uncompute/README.md).
+-- at and the reason, rather than silently dropped -- most non-error
+-- examples now succeed (qif, function calls, and EC/classical-injection
+-- chains are all handled); the ones that still SKIP need the paper's
+-- split/merge pebble game (a drop nested in a qif branch, a reference
+-- created locally inside a branch/callee, one half of a jointly-computed
+-- pair) -- see uncompute/README.md's "Coverage" section for the exact,
+-- current boundary.
 module Main where
 
 import System.Environment  (getArgs)

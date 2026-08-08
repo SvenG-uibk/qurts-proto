@@ -56,13 +56,22 @@ rather than an extra qubit control.
 
 ## Coverage
 
-18 of 23 non-_error examples compile — every one the uncomputation pass can handle. Beyond
+25 of 30 non-_error examples compile — every one the uncomputation pass can handle. Beyond
 single gates/pairs/renames/borrows/meas:
 
 - **qif → controlled gates.** Each branch is classified by its return shape (RFresh from
-  [0]()/[1](), or RInput x threading a value through) and both branches unify onto one
-  shared result location. Every gate a branch emits carries the qif's control appended to any
-  already active, so nested qif compiles straight to a multi-controlled (Toffoli-shaped) gate.
+  [0]()/[1](), RInput x threading a value through, or RPair of two independently-classified
+  sub-shapes) and both branches unify onto one shared result location. Every gate a branch emits
+  carries the qif's control appended to any already active, so nested qif compiles straight to a
+  multi-controlled (Toffoli-shaped) gate. A qif returning a pair, where each branch pairs up the
+  *same* two outer variables in a *different* order (Fig. 9's "simulation qif" describes this as
+  a controlled-swap, `example_qif_pair_return`), is handled by `alignTo`: whichever branch's
+  natural order doesn't already match the shared target gets corrected with SWAP gates, each
+  gated on that branch's own control alone, so the correction only ever touches that branch's own
+  amplitude component — see the "Fixed" section below. What's still not attempted: a branch that
+  builds a genuinely *fresh* qubit as one component of a pair (`classifyReturn`'s `RFresh` case
+  only targets a single shared qubit, not a sub-position of a larger pair) fails loudly rather
+  than binding to the wrong qubits.
 - **Function call inlining.** A callee's body compiles into the caller's own instruction stream,
   with its parameters bound to the caller's argument locations.
 - **Classical if**, when the condition resolves to a compile-time-known bool (a literal, or a
@@ -90,6 +99,42 @@ Examples that intentionally return a live, unmeasured qubit matching the paper's
 structure directly instead (a genuine Toffoli/CCX for AND, a single `not` for the call example,
 ...) — `--simulate` on those reports "no measurable output" now, correctly, since the compiled
 circuit is an exact translation of a source that never measures anything (see below).
+
+`example_qif_pair_return` is verified against Fig. 9's own predicted controlled-swap correlation:
+simulating gives only `011`/`100` outcomes (decoding to `p=0,a=0,b=1` and `p=1,a=1,b=0`), each
+~50%, with zero occurrences of any other combination — exactly the perfect correlation a
+controlled-swap must produce, never a partial or spurious one.
+
+## Fixed: a qif returning a pair (Fig. 9's controlled-swap) failed to compile
+
+`compileQifCore` used to classify a branch's return shape as one of `RFresh` (built via
+[0]()/[1]()) or `RInput x` (an outer value threaded through) only; anything else, including a
+branch returning a pair (`SLetExpr y (EPair a b)`), fell into a shared `ROther` bucket that
+`compileQifCore` explicitly refused to compile. This meant Fig. 9's own worked example of a
+controlled-swap — `qif p { let t1 = (y,x); t1 } else { let t0 = (x,y); t0 }` — couldn't compile at
+all, even though it type-checks (nothing in Figs. 5-8/13-17 restricts qif's return type to
+bool/qbit) and needs no uncomputation.
+
+Fixed by making `RKind` recursive (`RPair RKind RKind`) so `classifyReturn`/`unifyKind` can
+classify and unify a pair-shaped return component-wise, and `resolveTarget` (the renamed,
+generalized target-selection logic from `compileQifCore`) recurses into `RPair` to build an
+`LNode` of independently-resolved sub-locations. The remaining piece was correctness for two
+branches that pair up the *same* two outer variables in *different* orders (exactly the
+controlled-swap case): each branch's own natural location order is corrected onto the shared
+target by a new `alignTo` step, replacing the old exact-match check at the end of
+`compileBranchOnto`. When a branch's return carries the right qubits but in the wrong order,
+`alignTo` inserts SWAP gates gated on *that branch's own controls alone* — so, concretely, for
+`qif p { (y,x) } else { (x,y) }`, only the false branch's `(x,y)` needs correcting, giving exactly
+one SWAP gated on `p=0`. Because a gate's control restricts it to that one branch's amplitude
+component of the superposition (true of every other gate this compiler already emits), applying
+the correction to only one branch is sound even though both branches' gates land on the very same
+physical qubits — confirmed by direct amplitude calculation before implementing, then by
+simulation after (see above).
+
+Deliberately not attempted in the same pass: a branch building a genuinely fresh qubit as one
+*component* of a pair (as opposed to threading an existing one) — `compileBranchStmt`'s
+`EInit0`/`EInit1` cases now explicitly fail loudly when the shared target is pair-shaped, rather
+than silently binding a sub-component's value onto the whole pair's location.
 
 ## Fixed: example_grover.qurts-core used to give the wrong answer
 

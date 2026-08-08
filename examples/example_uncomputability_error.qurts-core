@@ -1,0 +1,26 @@
+fn example_uncomputability_error < | > (p : # bot qbit) -> # bot qbit {
+    let q = [0]() ;
+    newlft alpha ;
+    let rp = & alpha p ;
+    let q = qif rp {
+        let q2 = [X](q) ;
+        q2
+    } else {
+        noop ;
+        q
+    } ;
+    drop rp ;
+    endlft alpha ;
+    newlft beta ;
+    let rq = & beta q ;
+    let p2 = qif rq {
+        let p3 = [X](p) ;
+        p3
+    } else {
+        noop ;
+        p
+    } ;
+    drop rq ;
+    endlft beta ;
+    p2
+}

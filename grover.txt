@@ -30,10 +30,13 @@ accepted *any* identifier as `c`, including non-classical gates like H --
 `[H](x)` type-checked exactly like `[not](x)`, preserving droppability for a
 gate that mixes basis states. This was only ever caught by accident,
 downstream, when the gate-inverse lookup table happened not to recognise the
-name. `[c]` is now restricted to a small, closed, verified registry
-(not/cnot/swap), matching Section 3.2.1's own description of `[c]` as "the
-lift of a classical Boolean injective function" (and matching Unqomp's qfree
-definition literally: coefficient exactly 1, no phase -- which even Z fails).
+name. `[c]` is now restricted to names GateInverse.hs has a verified inverse
+for -- not/cnot/swap plus the whole diagonal family (I/Z/S/Sdg/T/Tdg; see
+point 6, below, for why the diagonal gates are included despite not being
+"classical Boolean injective functions" in Section 3.2.1's literal sense).
+`H` (and any other gate that actually mixes basis states) is still excluded,
+since GateInverse.hs has no verified inverse recorded for it under EC at all
+-- that exclusion was never really about qfree-ness, see point 6.
 
 2. The "qif issue": why removing the skip regressed the shipped Grover example
 
@@ -169,3 +172,50 @@ Circuit.hs would need: "qif ctrl { phase(pi) } else { noop }" must compile
 directly to a Z gate on ctrl's own qubit, bypassing the ordinary
 per-branch-value compilation path. None of that is covered by the paper's
 existing theorems (4.5, 5.4), so it would need its own soundness argument.
+
+6. Follow-up decision: allow the whole diagonal family via EC, unconditionally
+
+After point 4's re-encodings shipped, we revisited whether `[c]` should stay
+restricted to the Unqomp-qfree subset (not/cnot/swap) or admit the diagonal
+family too. Decided: admit it. The restriction had quietly conflated two
+different questions -- "is dropping a value built from this gate sound" and
+"does the gate happen to look like a classical function" -- and only the
+first is actually the type checker's job. Given (a) Uncompute.hs's reversal
+is now full and faithful for any gate at all, and (b) an unrecognised gate
+name already fails loudly at uncompute time rather than silently (both true
+regardless of this decision), restricting *which* correctly-invertible names
+are admissible doesn't buy any additional soundness -- it only rejects
+well-typed, faithfully-uncomputable programs for computing something the
+type system judges "pointless". That's not Qurts's job: a type system
+guarantees an operation is safe, not that the program does anything useful
+with it. Concretely, this is why example_grover_original.qurts-core (the
+pre-fix ancilla/oracle/phase/drop encoding, restored from git commit
+b78d43c with `meas()` added back -- see the repo's own git log) is being
+kept in the example suite deliberately, specifically *because* it is
+"wrong": it type-checks, uncomputes, and runs, and gives a uniform (not
+peaked) distribution, since full reversal correctly cancels its own phase
+kickback right along with everything else. That's the type checker doing
+exactly its actual job and nothing more.
+
+This does not retract point 4b's finding -- classical-basis tracking is
+still sound, still more precise than the old name-based skip, and would
+still let a program like example_grover_original.qurts-core's actually
+produce the *correct*, peaked distribution instead of merely type-checking.
+The two are different fixes at different layers: this point (6) is about
+what `[c]` is allowed to name (a type-checker admission question, resolved
+now); 4b is about whether a specific already-admitted gate's reversal can be
+skipped in a specific drop without breaking something else (a scheduling
+question, deliberately deferred). The right place for 4b's fix isn't a
+per-gate lookup table at all -- it's wherever a `drop`'s reversal actually
+gets planned, which doesn't exist as a separate concept yet in this
+implementation: `Uncompute.hs` currently does the simplest possible thing
+(reverse a value's *entire* tracked history immediately, in place, the
+moment a `drop` is reached), not the paper's own fuller reversible-pebble-
+game flexibility (Section 5.1: pebbles can be placed and cleared in whatever
+order and at whatever point the wielded strategy chooses, which is exactly
+the extra freedom a real fix would need to exploit). Uncompute.hs's own
+module header already documents this as the project's biggest known gap
+("naive strategy only ... what's missing is the paper's split/merge pebble
+game"); a sound, selective diagonal-gate skip is one more reason to want
+that done properly, not a justification for hand-rolling a narrower version
+of it ahead of time in GateInverse.hs.

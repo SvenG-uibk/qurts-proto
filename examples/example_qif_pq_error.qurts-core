@@ -1,4 +1,4 @@
-fn example_qif_pq_error < alpha | > (p : # bot qbit) -> # bot qbit {
+fn example_qif_pq_error < | > (p : # bot qbit) -> # bot qbit {
     let q = [0]() ;
     newlft alpha ;
     let r = &alpha q ;

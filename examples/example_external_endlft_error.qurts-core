@@ -1,0 +1,6 @@
+fn example_external_endlft_error < alpha | > (r : & alpha # bot qbit) -> # top bool {
+    drop r ;
+    endlft alpha ;
+    let b = true ;
+    b
+}

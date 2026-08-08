@@ -1,0 +1,14 @@
+fn count_ref < gamma | > (r : & gamma qbit) -> # top bool {
+    let b = true ;
+    b
+} ;
+
+fn example_borrow_affine < | > (x : # bot qbit) -> # bot qbit {
+    newlft gamma ;
+    let r = & gamma x ;
+    r as & gamma qbit ;
+    let discard = count_ref<gamma>(r) ;
+    drop discard ;
+    endlft gamma ;
+    x
+}

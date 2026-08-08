@@ -1,0 +1,5 @@
+fn example_ec_arity_error < | > () -> # top qbit {
+    let q = [0]() ;
+    let q2 = [cnot](q) ;
+    q2
+}

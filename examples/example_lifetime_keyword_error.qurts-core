@@ -1,0 +1,6 @@
+fn example_lifetime_keyword_error < | > () -> # top bool {
+    newlft bot ;
+    endlft bot ;
+    let b = true ;
+    b
+}

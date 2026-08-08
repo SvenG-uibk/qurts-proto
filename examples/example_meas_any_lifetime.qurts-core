@@ -1,0 +1,5 @@
+fn example_meas_any_lifetime < | > () -> # top bool {
+    let q = [0]() ;
+    let b = meas(q) ;
+    b
+}
