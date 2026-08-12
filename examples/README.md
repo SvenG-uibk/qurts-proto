@@ -127,20 +127,47 @@ returns both. Mixes linear and always-affine qubits in one return type.
 Fig. 2 + Appendix A — Grover's algorithm for 3 qubits, marked solution (`|111⟩`) hardcoded as a
 truth table (`oracle`, `non_zero`) rather than a generic oracle; a direct phase oracle (`[Z]` on
 a search qubit, no ancilla). Simulates to ~94.5% on `|111⟩` over 2000 shots. `&mut qbit` params
-become owned `#⊥ qbit` mutated by shadowing; the loop is manually unrolled.
+become owned `#⊥ qbit` mutated by shadowing; the loop is manually unrolled. `oracle`/`diffusion_phase`
+declare `-> #bot qbit` (not `#alpha`): their own qif branches mix a `#bot`-tagged value with an
+untouched one, and `#bot` is the most precise type the automatic lifetime-intersection (`grover.txt`
+point 9) can derive there — matches what their own call sites were already narrowing down to
+immediately afterward anyway.
 
 ### example_grover2.qurts-core
 Same algorithm, via the textbook `|−⟩` phase-kickback ancilla instead: a dedicated qubit prepared
 in `|−⟩` (via bare `H`, which forfeits its own droppability), XORed against by the oracle, and
 disposed of with `meas` rather than `drop` (its own state is never touched by a diagonal phase, so
-nothing needs uncomputing). Simulates to ~938/1000 on `|111⟩`.
+nothing needs uncomputing). Simulates to ~938/1000 on `|111⟩`. `kickback_and`/`kickback_all_zero`
+declare `-> #bot qbit`, same reason as `example_grover.qurts-core`'s `oracle` above.
 
 ### example_grover_original.qurts-core
-Reconstructed from git history — the *pre-fix* ancilla/phase/drop encoding (temporary boolean
-ancilla, phased via a rebind, then `drop`ped) that the diagonal-gate uncompute fix broke. Kept
-deliberately: it still type-checks and uncomputes, but full/faithful reversal correctly cancels
-its own phase kickback, so it simulates to a *uniform* distribution — a legal, if pointless,
-program (see `uncompute/GateInverse.hs`'s module note).
+Reconstructed from git history — the paper's own ancilla/phase/drop encoding (temporary boolean
+ancilla, phased via a rebind through `[Z]`, then `drop`ped). Briefly gave a *uniform* distribution
+while the diagonal-gate skip was removed (full/faithful reversal correctly cancels its own phase
+kickback along with everything else) — kept during that period specifically to demonstrate that
+was still legal, if pointless. Now that the skip is reinstated (see
+`uncompute/GateInverse.hs`'s module note), `drop tmp`'s `[Z]` is correctly left un-reversed again,
+and this simulates back to a peak at `|111⟩` (~941/1000), matching the paper's own construction.
+
+### example_diagonal_skip_counterexample_error.qurts-core
+Not from the paper — the counterexample that originally motivated removing the diagonal-gate
+uncompute skip (see `uncompute/GateInverse.hs`'s module note), now kept as a regression test for
+the type-checker fix it led to. Puts a control qubit `c` in superposition (`H`), then `qif`s on
+it: one branch runs `H` then `Z` on a fresh ancilla, the other branch does nothing. Used to
+type-check — `typ_qif`'s own retagging accepted a `#⊥`-tagged branch (produced by the bare-EU
+`H`/`Z` chain) merged against a `#⊤`-tagged sibling via an ad hoc subtyping search that Fig. 15's
+actual `EXPR QUANTUM IF` rule never licenses (it requires the *literal same* `T` from both
+branches, exactly like `EXPR CLASSICAL IF` beside it) — and, with the diagonal skip reinstated,
+that let the `drop` silently leave the ancilla entangled with `c` (measuring `H(c)` afterward came
+out ~50/50 instead of deterministic, an invalid discard, Definition 2.1). `checkExpr (EQIf ...)`
+(`TypeChecker.hs`) now infers the *intersection* of the two branches' lifetimes automatically
+(mirroring Rust's own if/else lifetime inference — `grover.txt` point 9) rather than requiring a
+literal match, so the qif itself now type-checks (`meet(⊥,⊤) = ⊥`, the most precise type actually
+derivable) — but the subsequent `drop result;` still correctly fails, with `CannotDrop (TyBang
+LBottom TyQBit)`: `#⊥` is never active (`canDrop`'s own `drop_own` rule), so it was never droppable
+regardless of this qif change. A more precise rejection than the earlier `TypeMismatch`, at exactly
+the point droppability is actually claimed rather than at the qif itself — see `grover.txt` points
+8–9 for the full history.
 
 ### example_grover_amplified.qurts-core
 Not from the paper — amplitude amplification (Brassard–Høyer–Mosca–Tapp 2000): iteration count

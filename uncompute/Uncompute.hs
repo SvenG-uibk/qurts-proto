@@ -37,7 +37,7 @@ module Uncompute
   ) where
 
 import Ast
-import GateInverse (unitaryInverse, classicalInverse)
+import GateInverse (unitaryInverse, classicalInverse, isDiagonalUnitary, isDiagonalClassical)
 import PrettyAst (flattenStmt)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -407,14 +407,15 @@ reverseOrigin _ n FromBorrow  currentVar = Right ([], currentVar, n)
 -- been EU's argument in the first place -- so it's fine that this just
 -- falls through to FromBorrow's own no-op case rather than asserting.)
 --
--- No gate is ever skipped here, diagonal or not -- see GateInverse.hs's
--- module-level note for why the previous diagonal-skip shortcut (isDiagonalUnitary
--- / isDiagonalClassical) was removed: it's unsound in general, not just
--- unnecessary. Full reversal -- apply each gate's own exact inverse, in
--- exact reverse order, every time -- is what Qurts's uncomputation-semantics
--- theorem (Thm 5.4) actually establishes as correct; there is no theorem
--- (in Qurts or in Unqomp, which this pass's approach is modelled on)
--- licensing a shortcut based on a gate's name being diagonal.
+-- A diagonal gate (isDiagonalUnitary -- I/Z/S/Sdg/T/Tdg) is skipped
+-- entirely: no step emitted, just keep unwinding prev under the *same*
+-- currentVar, since nothing was rewritten. See GateInverse.hs's
+-- module-level note for the full history (found unsound, removed, then
+-- reinstated per Kengo's confirmation that a value reaching a `drop` is
+-- always qfree) and grover.txt point 7 for the open gap this currently
+-- depends on (TypeChecker.hs's qif rule doesn't yet enforce it).
+reverseOrigin reserved n (FromGate u prev) currentVar
+  | isDiagonalUnitary u = reverseOrigin reserved n prev currentVar
 reverseOrigin reserved n (FromGate u prev) currentVar = do
   invU <- note ("no known inverse for unitary gate " ++ show u) (unitaryInverse u)
   let (fresh, n') = freshVar reserved n
@@ -434,24 +435,10 @@ reverseOrigin reserved n (FromGate u prev) currentVar = do
 -- case only unwraps a bare FromPair, not a FromClassicalGate-wrapped one,
 -- so a destructured half stays FromUnbound and fails at the lookup instead.
 --
--- No gate is skipped here either, same reasoning as FromGate above. See
--- GateInverse.hs's module note: the former diagonal-skip shortcut assumed a
--- diagonal gate can never need reversing because it "only multiplies a
--- branch's own amplitude by a phase" -- true in isolation, but that argument
--- silently assumed the value was already confined to a single computational-
--- basis ket at the point the diagonal gate was applied. Nothing in Qurts's
--- type system guarantees that: a qif's own typing rule (typ_qif) retypes a
--- branch's return value to #alpha T regardless of what bang-tag that branch
--- actually produced -- including #bot, from an EU-dispatched *non*-diagonal
--- gate earlier in that same branch's own local history. So a diagonal gate
--- can end up applied to a value that is genuinely, locally superposed, not
--- just phase-tagged per branch -- and skipping its reversal there silently
--- entangles the dropped value with whatever it was branching on instead of
--- returning it to |0>. (Confirmed by direct construction: `H` then `Z`,
--- both bare EU, inside one branch of a qif whose other branch is untouched,
--- typechecks, and the compiled circuit's two branches disagree on the
--- qubit's final value after the old skip-based reversal -- exactly the
--- invalid, non-disentangling drop Definition 2.1 forbids.)
+-- Same diagonal skip as FromGate above, using isDiagonalClassical instead --
+-- see that case's comment and GateInverse.hs's module note.
+reverseOrigin reserved n (FromClassicalGate c prev) currentVar
+  | isDiagonalClassical c = reverseOrigin reserved n prev currentVar
 reverseOrigin reserved n (FromClassicalGate c prev) currentVar = do
   invC <- note ("no known inverse for classical injection " ++ show c) (classicalInverse c)
   let (fresh, n') = freshVar reserved n

@@ -11,58 +11,44 @@ PART 1: What actually exists right now (pipeline overview)
 --------------------------------------------------------------------------------
 
     .qurts-core source
-          |
-          v
     [1] Parse        (bnfc/ -- Alex/Happy generated lexer+parser from a BNFC
           |           grammar file, converted into our own Ast.hs shape by
-          |           AbsQurtsToAst.hs)
-          v
+                      AbsQurtsToAst.hs)
+
     [2] Type check    (typeChecker/TypeChecker.hs)
-          |
-          v
     [3] Uncompute     (uncompute/Uncompute.hs, GateInverse.hs)
-          |
-          v
     [4] Circuit IR    (circuit/Circuit.hs)
-          |
-          v
     [5] Qiskit render (circuit/build_circuit.py -- draws the circuit, and,
                         with --simulate, runs it on Aer and prints outcome
                         counts)
 
 Status of each stage:
 
-[1] Parse -- complete. Full core grammar (Fig. 3), nothing missing.
+[1] Parse -- complete. Full core grammar (Fig. 3), nothing missing (at least
+I didnt have any issues with it so far).
 
 [2] Type check -- audited rule-by-rule against every typing judgement in the
-    paper (Figs. 5-8, 13-17) across several passes, not just spot-checked,
+    paper (Figs. 5-8, 13-17) across several passes,
     which turned up and fixed several implementation bugs along the way
     (unenforced lifetime well-formedness assumptions from Section 3.2.1, a
     couple of soundness gaps around variable reuse and lifetime-relation
-    bookkeeping, an arity-checking gap in [c](x)). None of those are open
-    questions -- they were just bugs, now fixed, no ambiguity about the
-    paper's own intent in any of them. The four genuinely open questions,
+    bookkeeping, an arity-checking gap in [c](x)). The four genuinely open questions,
     where it's *not* clear whether the paper's own formal rule or the
     implementation should give way, are below.
     Fig. 13's full subtyping lattice (shorten, reborrow, double-affine,
     borrow-affine, affine-borrow, tuple, unit) is implemented and exercised
-    by the 42+ examples in examples/. Loops, recursion, mutable variables,
-    algebraic data types: out of scope, matching the paper's own Section 7
-    (explicitly future work / not in qurts-core). Full Qurts's sugar layer
+    by the examples. 
     (automatic lifetime/copy/drop inference, mutable references, for-loops --
     Section 3.1's examples use these) is also explicitly out of scope: we
-    target qurts-core, the formalised calculus, not full Qurts.
+    target qurts-core, not full Qurts.
 
-[3] Uncompute -- the real gap, and the most interesting stage. Rewrites each
-    `drop x` into the literal reversed sequence of whatever produced `x`,
+[3] Uncompute -- the real gap of the prototype, and the most interesting stage. 
+    Rewrites each `drop x` into the literal reversed sequence of whatever produced `x`,
     in place, immediately, right where the source wrote `drop` -- NOT the
     paper's own flexible pebble-game placement (Section 5.1), which allows
     computing/uncomputing in whatever order and at whatever point a chosen
-    strategy picks (the programmer gets some of this manually, by choosing
-    where in the source to write `drop` -- but that's a fixed, per-program
-    choice, not the compiler exploring/optimising placements itself). This
-    "naive strategy only" gap is what's actually blocking further progress;
-    see Part 2, question 2.
+    strategy picks. This "naive strategy only" gap is what's actually 
+    blocking further progress, see Part 2, question 2.
 
     Handled: EU/EC gate chains on a single tracked value back to init,
     bare renames/borrows/copy/measured-bool, pair-destructure of a literal
@@ -84,22 +70,18 @@ Status of each stage:
     *measured* bool compiles to a real Qiskit if_test control-flow block.
 
 [5] Render/simulate -- works, spot-verified against known-correct
-    distributions (Bell state, Toffoli truth table, Grover peaking at
-    |111> ~93-95%/1000 shots, a classical
+    distributions (Bell state, Toffoli truth table, Grover, a classical
     if_test example where the measured condition and its corrected qubit
-    always agree). Not yet an automated regression suite over every
-    example's simulated output -- currently hand-picked spot checks.
+    always agree). Not yet fully complete - but I think all examples work.
 
-Net: a real, working parse-check-uncompute-circuit-simulate pipeline exists
+Net: a working parse-check-uncompute-circuit-simulate pipeline exists
 and runs end to end on everything the paper's core calculus covers, except
-for the split/merge pebble game, which is a known, scoped, well-understood
-gap (not a mystery -- we know exactly what's missing and why).
+for the split/merge pebble game.
 
---------------------------------------------------------------------------------
-PART 2: The four open questions
---------------------------------------------------------------------------------
-
-Both came out of trying to implement Grover's algorithm (the paper's own
+---------------
+Open questions
+---------------
+First two came out of trying to implement Grover's algorithm (the paper's own
 running example, Section 3.1 / Appendix A) faithfully in qurts-core. Full
 technical writeup with worked examples and verified counterexamples is in
 grover.txt at the repo root; this is the short version.
@@ -121,14 +103,12 @@ checked this directly rather than assuming it:
     so a qif branch built from it has type (). typ_qif requires both
     branches Purely Quantum (Fig. 7); () fails that unconditionally.
     Confirmed: type-checking a qif with a ()-typed branch fails with
-    NotPurelyQuantum.
+    NotPurelyQuantum in this prototype.
   - The qif line above is used as a bare statement, result unnamed. The
     core grammar's Stmt has no "expression as its own statement" form --
     every expression must be let-bound.
 
-Footnote 4 already says Grover's Fig. 2 code uses "standard features from
-Rust... not formally defined in Section 3.2... part of an implementation of
-Qurts in development" -- so this might just be known and intentional. The
+
 question worth asking directly: is there a *planned* way to formalise this
 specific idiom (a targetless global-phase primitive, usable only inside a
 qif, exempt from the Purely Quantum restriction, compiling directly to a Z
@@ -137,43 +117,32 @@ programmers always encode phase kickback some other way (a real ancilla,
 or -- our workaround -- applying the phase directly to one of the qubits
 already in play)? If there's no planned answer yet, this seems like a
 genuinely small but concrete language-design gap: core-calculus qurts-core
-currently cannot express the paper's own headline example's cleanest
-formulation of its own headline algorithm.
+currently cannot express this example's cleanest formulation.
 
 --- Question 2: does automatic uncomputation need the type system to know
     about basis states, or is that fundamentally a scheduling question?
 
-The concrete symptom: an early version of this project's Uncompute.hs
-special-cased diagonal gates (Z/S/T/...), skipping their reversal on drop,
-on the reasoning "a diagonal gate only phases a branch, it never needs
-undoing to reach |0>". This is what actually made the shipped Grover
-example give the right answer. It is unsound in general -- concretely,
-apply H then Z inside one branch of a qif (type-checks fine), drop the
-qif's result: the old skip logic left the two branches disagreeing on the
-qubit's final value, i.e. entangled with the control instead of returned to
-|0>. Removed the skip entirely; Uncompute.hs now reverses every gate fully
-and faithfully, unconditionally, which is what Thm 5.4 actually establishes
-as sound. Consequence: the *shipped* Grover example's own oracle (a
-temporary boolean ancilla, phased via a rebind, then dropped) stopped
-working -- full reversal correctly, faithfully undoes its own phase kickback
+From my limited understanding of quantum physics, it is wrong to uncompute
+"diagonal phase-only gates" as long as they are applied to a basis state.
+Is that correct? Do we fix that by drop-placement in the code? or does the
+automatic uncomputation have to check that (by... tracking basis states all
+over the program?)
+
+ Consequence: the papers Grover example's own oracle (a
+temporary boolean ancilla, phased via a rebind, then dropped) isnt
+working -- undoes its own phase kickback
 right along with everything else, giving a uniform instead of peaked
-distribution. Not a bug in the fix: Unqomp's own qfree criterion (which
+distribution. Unqomp's own qfree criterion (which
 Qurts's uncomputation approach is modelled on) already excludes Z for the
 same reason, and Unqomp's paper says outright that Grover/Deutsch-Jozsa's
 phase kickback is "built by hand, entirely outside" their automatic
 machinery.
 
-We worked around this two ways in the examples (a direct phase oracle with
-no ancilla at all; a real |-> phase-kickback ancilla disposed of via meas
+I worked around this two ways in the examples (a direct phase oracle with
+no ancilla at all; a real |-> phase-kickback ancilla disposed of via measure
 rather than drop, since it's a genuinely different physical operation that
 doesn't try to unitarily undo the kickback). Both work, verified by
-simulation. Separately, we also decided to just *allow* diagonal gates
-through the classical-injection dispatch ([c](x)) unconditionally now,
-on the principle that type-checking and "does the program do something
-useful" are different questions -- a program that type-checks, uncomputes,
-and gives a uniform distribution because it accidentally cancels its own
-phase kickback is not unsound, it's just pointless, and rejecting it isn't
-the type checker's job.
+simulation.
 
 But there's a real unresolved question underneath the workarounds: is there
 a *principled*, type-derivable way to decide, per drop, whether a given
@@ -186,14 +155,10 @@ state)? Or is "when to uncompute, and whether a given step even needs
 reversing" fundamentally not a *type* question at all, but a *scheduling*
 question that belongs entirely in the pebble-game semantics (Section 5),
 where a strategy is free to choose not to place/clear a pebble in a way
-that would destroy a needed correlation? If it's the latter, that reframes
-this project's biggest known gap (the missing split/merge pebble game,
-Part 1) as also being the answer to this question -- i.e. one piece of
-missing machinery, not two separate problems. That reframing is itself
-worth confirming with Kengo before investing in it.
+that would destroy a needed correlation? 
 
 --- Question 3: does typ_qif really require the *same* type from both
-    branches, or is that an artefact of the paper's own presentation?
+    branches?
 
 Found during a full correctness pass over the implementation against the
 paper (checking every rule in Figs 5-17 against what the code actually
@@ -202,7 +167,7 @@ prose) and the fully-formal one (Fig 15, "expr quantum if") state each
 branch's own judgement as "(Γ, A) ⊢ B_i : T" -- literally the *same* T for
 i=0 and i=1, no subtyping slack anywhere in either version.
 
-We had to relax this to get the paper's own Grover example to type-check.
+I had to relax this to get the paper's own Grover example to type-check.
 Concretely, example_grover_original.qurts-core's `oracle` (the paper's own
 boolean-oracle-then-phase-kickback shape) has an outer qif whose two
 branches are:
@@ -228,13 +193,12 @@ anywhere else in the calculus, and Fig 15's own rule is under-specified? Or
 is there a different, paper-intended way to write `oracle` that never
 produces mismatched branch types in the first place, making our relaxation
 a convenience that happens to also accept programs the core calculus never
-meant to? Worth asking directly, the same way Question 1 asks about
-phase(pi) -- both came from the identical exercise (getting the paper's own
-Grover example to actually type-check as formalised, not just
-conceptually), and this one turned up all this time later purely because a
-full rule-by-rule audit is what finally noticed it -- ordinary use of the
-example never surfaces it, since it always type-checks either way once the
-relaxation is in place.
+meant to? 
+
+--lifetime intersection
+--for question 3,4, check out rust's way of doing it, we should allow different lifetimes
+and just create a new lifetime which is the intersection of the two 
+(or in case of static, the other one)
 
 --- Question 4: does stmt_borrow's own "α ∉ A_ex,Π,f" premise actually hold
     up against a function that needs to hand a *locally built* value into a
@@ -251,6 +215,8 @@ example_grover_amplified.qurts-core's `oracle<alpha>`, which does:
     let rc1 = &alpha c1;                   -- borrow it with oracle's OWN alpha
     let result = all_satisfied3<alpha>(rc1, rc2, rc3);  -- -> #alpha qbit
     result                                  -- matches oracle's own -> #alpha qbit
+
+(to be fair, its fine if this breaks - I wrote it myself)
 
 Borrowing with a *fresh* local lifetime instead doesn't work around this:
 newlft's own rule ties any new local lifetime to be shorter than every
@@ -273,10 +239,6 @@ missing?
 
 --- Aside: pq_expr (Fig. 7) doesn't literally say what its own prose means
 
-Smaller than the four questions above, and not actually open -- the
-implementation already resolves it safely -- but worth a note since it's
-the same species of paper-vs-formula gap.
-
 Fig. 7's own pq_expr rule is "𝑒 : PQ" whenever
 "𝑒 ≠ meas 𝑥 ∧ ((𝑒 = 𝑓⟨𝛼⟩(𝑥) ∧ fn-name(𝐹) = 𝑓) ⇒ 𝐹 : PQ)" -- i.e. it only
 ever inspects the *top level* of 𝑒: is it literally a bare `meas x`, or a
@@ -289,7 +251,7 @@ measurement") clearly intends this to hold transitively, not just at the
 expression's own top level -- the whole point of Purely Quantum is to keep
 a measurement from ever hiding inside a qif branch, by any route.
 
-Our checkExpr's isPurelyQuantumExpr hard-excludes *any* classical `if`
+My checkExpr's isPurelyQuantumExpr hard-excludes *any* classical `if`
 used inside a qif branch outright, rather than trying to recurse into its
 own two sub-blocks the way the prose implies it should. That closes the
 gap conservatively: it can reject a classical `if` that happens to contain
@@ -299,13 +261,8 @@ actually be unsound). Nothing to fix -- just flagging that the formula in
 Fig. 7 doesn't, on its own, literally forbid what its own prose says it
 should.
 
---------------------------------------------------------------------------------
-Why this seems worth asking before deciding on a PhD around it: all four
-questions came from actually trying to build the thing, not from reading
-the paper abstractly -- they're concrete, we have worked counterexamples and
-a working implementation to point at, and question 2 in particular looks
-like it could be "this is exactly the open problem the pebble-game
-machinery is supposed to solve, go build that" (a real, scoped, buildable
-PhD direction) or "this is already understood/solved in unpublished
-follow-up work" (in which case the interesting question becomes something
-else). Worth finding out which before committing.
+-- check out OpenQASM and check if they have while loop (yes) and mid-circuit measurements (also yes)
+-- we could compile to that?
+
+-- we need to have two Z operations, one on #bot qubit and one 
+one global phase. we COULD also extend the #bot to #alpha? H meas should still work

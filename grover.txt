@@ -219,3 +219,231 @@ module header already documents this as the project's biggest known gap
 game"); a sound, selective diagonal-gate skip is one more reason to want
 that done properly, not a justification for hand-rolling a narrower version
 of it ahead of time in GateInverse.hs.
+
+7. Follow-up (2026-08-12): author says diagonal gates can always be skipped
+   during uncomputation -- re-tested the counterexample directly, it still
+   breaks
+
+Talked to Kengo. His answer to Question 2 above: we can always ignore Z and
+other diagonal gates during uncomputation -- i.e. reinstate the *unconditional*
+name-based skip from point 1 (not the basis-confinement refinement from 4b),
+full stop, no extra condition.
+
+Before wiring that back into GateInverse.hs/Uncompute.hs, re-ran the exact
+H-then-Z-in-one-qif-branch counterexample from point 1 through the real
+pipeline, this time with a live simulation rather than a hand-trace, to check
+it against this new claim directly. `examples/example_diagonal_skip_counterexample.qurts-core`:
+
+    fn diagonal_skip_test<||>() -> #top bool {
+        let c0 = [0]() ; c0 as #bot qbit ; let c = H(c0) ;   -- control qubit, put in superposition
+        newlft alpha ;
+        let rc = &alpha c ;
+        let result = qif rc {
+            let q0 = [0]() ; q0 as #bot qbit ;
+            let q1 = H(q0) ; let q2 = Z(q1) ;                 -- H;Z, both bare EU, one branch only
+            q2
+        } else {
+            let q0 = [0]() ; q0
+        } ;
+        drop result ;                                          -- the drop under test
+        drop rc ; endlft alpha ;
+        let c2 = H(c) ; let ret = meas(c2) ; ret                -- entanglement witness
+    }
+
+This type-checks today, unconditionally, exactly as point 2 above already
+established (typ_qif's own retagging accepts the #bot-tagged H;Z branch into
+the qif's #alpha, droppable result). The last three lines are a witness for
+whether `drop result` actually left `c` disentangled and pure: if it did,
+`c` is exactly H|0> again, and measuring `H(c)` is deterministic; if `result`
+was left entangled with `c` instead (the invalid-discard failure mode
+Definition 2.1 forbids), tracing it out leaves `c` maximally mixed, and
+`H(c)` measures ~50/50 regardless of what pure state `c` was "supposed" to
+be in -- a clean way to tell "genuinely disentangled" from "just happens to
+look right in the Z basis" without having to inspect amplitudes directly.
+
+Results, both from an actual build+`-simulate` run, not hand-traced:
+
+  - Today's code (full/faithful reversal, no skip): 1000/1000 on one outcome.
+    Deterministic, as expected -- `c` came back out pure.
+  - A scratch rebuild with the unconditional diagonal skip reinstated
+    (GateInverse.hs's isDiagonalUnitary/isDiagonalClassical restored exactly
+    as point 1 describes them, reverseOrigin's FromGate/FromClassicalGate
+    cases skip emitting a step when the gate is diagonal): 510/490. The
+    reconstructed reversal applies H (to undo the branch's own H) but skips
+    Z, so the "then" branch's ancilla lands on H(Z(H(|0>))) = H((|0>-|1>)/root2)
+    = |1>, not |0> -- the two branches of the reconstructed qif disagree
+    (|1> vs |0>), which is exactly the entangle-with-the-control failure
+    point 1's original hand-traced counterexample described. Reproduced
+    end-to-end this time, not just argued.
+
+So, taken completely literally ("we can always ignore Z, unconditionally"),
+this reintroduces the exact bug point 1 removed -- the claim and this test
+result are in direct tension. Possibilities, none resolved yet:
+
+  (a) The type checker is wrong to accept this program at all -- i.e. the
+      guarantee "uncomputed qubits are always qfree" is meant to hold
+      *given* a correct type system, and typ_qif's `return (TyBang alpha
+      (stripBang t))` (TypeChecker.hs) is the actual bug: it silently
+      strips whatever bang-tag a branch produced (including #bot from a
+      bare-EU chain like H;Z) and retags the qif's result as droppable
+      #alpha, with nothing tracking that the branch's own value was never
+      actually confined to a basis ket. If so, the fix belongs in the type
+      checker (reject, or require some further condition on, a branch whose
+      own history isn't qfree before letting typ_qif retag it droppable),
+      not in Uncompute.hs at all.
+  (b) The "always ignore diagonal gates" guarantee is meant to hold under
+      some narrower condition this test doesn't satisfy -- need to ask what
+      that condition actually is, since "gate is named Z/S/T" alone isn't
+      it (this test is a direct counterexample to that literal reading).
+  (c) Something about the surrounding discipline (how newlft/borrow/qif are
+      meant to be used together) rules a program shaped like this out in
+      practice, even though nothing in the current implementation actually
+      enforces it.
+
+Not implemented pending Kengo's read on this specific reproduction. The
+scratch build used for the 510/490 run was not committed -- only the
+counterexample program and this writeup are.
+
+8. Resolution (2026-08-12): Kengo confirmed the claim; the gap was (a) --
+   typ_qif's own retagging, not the diagonal skip. Fixed by matching Fig. 15
+   literally.
+
+Kengo confirmed the diagonal-gate-skip claim holds. That meant possibility
+(a) from point 7 was the live one: the type checker was letting through a
+program it shouldn't have. Went back to the paper's actual Fig. 15 (rendered
+the page directly, not just pdftotext -- extraction was garbled enough on
+this figure that it was worth checking by eye) to see exactly what
+EXPR QUANTUM IF requires:
+
+    x: &^alpha qbit in Delta      alpha in A      (Gamma,A) |- B_i : T
+                                  B_i : PQ              T : PQ
+    ------------------------------------------------------------------
+    qif x B_|1> else B_|0> . #^alpha T : (Gamma+Delta, A) --> (Delta, A)
+
+B_i : T for *both* i in {|1>,|0>} -- one literal shared T, exactly like
+EXPR CLASSICAL IF right next to it in the same figure (same shape: both
+branches judged against the identical T). No subtyping anywhere in that
+premise. TypeChecker.hs's EIf case (classical if) already enforces this
+literally (`unless (t1 == t2) $ throwError (TypeMismatch t1 t2)`) -- EQIf
+was the one place that didn't, instead accepting t1/t2 whenever *either*
+subtyped the other (via SUBTY SHORTEN, Fig. 13: `b <= a in A` gives
+`P^a T <= P^b T`, i.e. a pointer type narrows from a longer lifetime to a
+shorter one) and picking whichever "won", then discarding its own tag
+entirely and re-wrapping with a fresh alpha with no check that alpha was
+even reachable from it. That extra machinery is not in the rule above at
+all -- it was this implementation's own invention, not licensed by the
+paper, and it's exactly what let point 7's counterexample through: #TOP
+qbit ≤ #bot qbit always holds (SUBTY SHORTEN with a=TOP, since everything is
+<= TOP), so the bare-[0]() branch (#TOP) and the H;Z branch (#bot, EU's
+pin) were accepted as "compatible", #bot "won" the merge (correctly, by
+subtyping), and then got silently overwritten with alpha regardless -- the
+one-way-door property of #bot was never actually checked against the
+target it was being retagged into.
+
+Fix: `checkExpr (EQIf x bt bf)` (TypeChecker.hs) now requires `t1 == t2`
+exactly, matching Fig. 15 and mirroring what checkExpr's EIf case already
+does. No more subtyping search inside the rule itself. Re-ran the
+counterexample: now rejected outright at type-check time --
+`TypeMismatch (TyBang LBottom TyQBit) (TyBang LTop TyQBit)` -- not merely
+mis-uncomputed at runtime. Renamed to
+examples/example_diagonal_skip_counterexample_error.qurts-core to match the
+repo's own _error convention.
+
+This tightening is exactly what the paper's own stmt_coercion rule exists
+to route around: a qif whose two branches are "morally the same value" but
+happen to carry different lifetime tags (typically because one branch
+nests a further qif, whose own conclusion is unconditionally re-tagged
+#^alpha by the very same rule, while its sibling branch is a bare [0]()
+sitting at #TOP) now needs an explicit `x as #T qbit;` inside whichever
+branch to unify the two literally, before the outer qif's own rule applies
+-- the programmer's job via an explicit statement, not something typ_qif's
+own algorithm should paper over silently. This broke 8 examples that relied
+on the old auto-merge (example_and, example_grover's oracle/diffusion_phase,
+example_grover2's kickback_and/kickback_all_zero,
+example_grover_amplified(2)'s clause_or2/clause_nand2/clause_impl/
+clause_or2_neg_second/all_satisfied3(6)/non_zero, example_grover_original's
+oracle/non_zero, example_reinitialise, example_self_controlled_uncomp) --
+all fixed the same way, by inserting the coercion into whichever branch's
+type needed narrowing to match its sibling (SUBTY SHORTEN only narrows,
+never widens, so the direction matters: #TOP can always narrow into
+whatever the sibling is; #bot can only ever be matched by something already
+at #bot, never coerced *into* from anything else, and never coerced *out of*
+to anything else either -- confirming #bot really is a one-way door end to
+end, now enforced at exactly the point that used to leak it). All 43/43
+examples still parse+check, 25/30 still uncompute (same five pre-existing
+pebble-game gaps as before, no new regressions), and
+example_grover/example_grover2/example_grover_original all still simulate
+to the same peaked distributions as before (~939-943/1000 on the marked
+state) -- confirmed by an actual rebuild+simulate run, not just re-argued.
+
+9. Refinement (2026-08-12): automatic lifetime intersection, replacing the
+   manual `as` coercions from point 8 -- confirmed with Kengo
+
+Point 8's fix (`t1 == t2` exactly, no subtyping at all) is what Fig. 15
+literally states, but the paper is deliberately strict there to keep its own
+proof simple -- Kengo confirmed the *implementation* is expected to be more
+permissive, the same way Rust doesn't force two if/else branches to name the
+identical lifetime, only to be unifiable: infer the *intersection* (greatest
+lower bound) of the two branch lifetimes automatically, rather than making
+the programmer spell out an explicit coercion every time. Concretely: if a
+lifetime is ⊤ ("static"), the intersection with anything is just the other
+lifetime (⊤ is infinite, so it imposes no restriction at all); otherwise,
+synthesise something that "ends together with whichever of the two ends
+first."
+
+Implementation: rather than literally minting a fresh `newlft`-tracked
+variable for that "something" (which would need new bookkeeping to cascade
+an `endlft` of either parent into ending the derived one too -- easy to get
+out of sync), added `LMeet LifetimeAtom LifetimeAtom` as a purely structural,
+derived lifetime term (Ast.hs) that is *never* registered in
+LifetimePreorder's own ltVars at all. `isActive`/`leq` (TypeChecker.hs)
+handle it recursively instead: `isActive (LMeet a b) = isActive a &&
+isActive b` -- computed fresh every query, so it automatically stops being
+active the instant either parent does, for free, with nothing to keep in
+sync. `meetLft` computes the actual meet (⊤ is the identity, ⊥ is absorbing,
+otherwise builds an `LMeet` node); `unifyBranchTypes` walks two branch types
+structurally, meeting the lifetime at each corresponding `#^𝔞`-position
+while still requiring an exact match everywhere else (different type
+shapes -- bool vs qbit, say -- are still a hard TypeMismatch); `retagQifResult`
+replaces the old "discard the branch's own tag, substitute a fresh α" step
+with "meet α *into* the branch's own tag" -- never information-destroying,
+unlike the original unsound version this whole investigation started from.
+
+Re-verified by literally reverting all 8 of point 8's manual `as`
+coercions back to their original (pre-session) form and re-running the
+suite: 6 of the 8 (example_and, example_grover_amplified(2),
+example_grover_original, example_reinitialise, example_self_controlled_uncomp)
+now pass with *zero* manual coercions at all -- the automatic meet handles
+the #top-vs-#specific-lifetime merges natively (meet(⊤,α)=α, recovering
+exactly the old "just use α" behaviour, but only when it's actually sound
+to do so). The remaining 2 (example_grover's oracle/diffusion_phase,
+example_grover2's kickback_and/kickback_all_zero) failed differently:
+ReturnTypeMismatch, not TypeMismatch -- because these mix a #bot-tagged
+branch with the qif's own control lifetime, and meet(bot, anything) = bot
+is genuinely the most precise type derivable (not an artifact to work
+around), which no longer matches what these functions had *declared*
+(`-> #alpha qbit`, inherited from when the old unsound retag always
+produced α regardless). Fixed by changing their declared return types to
+`-> #bot qbit` (removing the now-redundant `z as #bot qbit;` casts their
+own callers had already been inserting immediately after every call site,
+confirming #bot really was what those call sites needed all along).
+
+Ran the H;Z-in-qif-branch counterexample once more under this refined
+version: the qif itself *now type-checks* (meet(⊥,⊤)=⊥ is accepted, unlike
+point 8's stricter version), but the subsequent `drop result;` fails with
+`CannotDrop (TyBang LBottom TyQBit)` instead of point 8's `TypeMismatch` --
+`canDrop`'s own `drop_own` rule (`isActive a`) already made `#bot` provably
+never droppable (`isActive LBottom = False`), completely independently of
+this qif change. This is a *better* rejection than point 8's, not just a
+different one: it correctly accepts a qif that mixes #bot/#top branches for
+any purpose *other* than immediately dropping the result (e.g.
+example_grover's oracle, which threads its #bot-derived z onward to be
+measured, never dropped) instead of blanket-rejecting the merge itself, and
+only refuses at the exact point where droppability is actually claimed.
+Updated the counterexample's own `.expected` file (`CannotDrop`) to match.
+
+Full suite after this refinement: 43/43 parse+check (same as before this
+whole investigation started), 25/30 uncompute (same five pre-existing
+pebble-game gaps, no new regressions), and example_grover/example_grover2/
+example_grover_original all re-simulate to the same peaked distributions
+(~931-954/1000) -- confirmed by an actual rebuild+simulate run.

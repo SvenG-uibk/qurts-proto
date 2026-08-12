@@ -1,0 +1,23 @@
+fn diagonal_skip_test < | > () -> # top bool {
+    let c0 = [0]() ;
+    c0 as # bot qbit ;
+    let c = H(c0) ;
+    newlft alpha ;
+    let rc = & alpha c ;
+    let result = qif rc {
+        let q0 = [0]() ;
+        q0 as # bot qbit ;
+        let q1 = H(q0) ;
+        let q2 = Z(q1) ;
+        q2
+    } else {
+        let q0 = [0]() ;
+        q0
+    } ;
+    drop result ;
+    drop rc ;
+    endlft alpha ;
+    let c2 = H(c) ;
+    let ret = meas(c2) ;
+    ret
+}

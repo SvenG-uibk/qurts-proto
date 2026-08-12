@@ -161,10 +161,16 @@ putLfts :: LifetimePreorder -> TC ()
 putLfts lp = modify (\st -> st { tcLfts = lp })
 
 -- Check α ∈ A  (i.e. α is currently active, α > ⊥)
+--
+-- LMeet a b (see its own note in Ast.hs) is active iff *both* a and b are
+-- -- computed fresh from the current state every call, never cached, so a
+-- meet automatically stops being active the moment either side does,
+-- without this function (or anything else) needing to know that happened.
 isActive :: LifetimeAtom -> TC Bool
-isActive LBottom    = return False   -- ⊥ is never in A as a variable
-isActive LTop       = return True    -- ⊤ is always available
-isActive (LVar α)   = do
+isActive LBottom      = return False   -- ⊥ is never in A as a variable
+isActive LTop         = return True    -- ⊤ is always available
+isActive (LMeet a b)  = (&&) <$> isActive a <*> isActive b
+isActive (LVar α)     = do
   lp <- getLfts
   return (Set.member α (ltVars lp))
 
@@ -188,14 +194,46 @@ requireActive lft = do
 -- hold. reachable does a plain visited-set search over ltRel treated as a
 -- graph rather than pre-materialising the closure, since A changes too
 -- often (every newlft/endlft/leq) to make caching it worthwhile here.
+-- LMeet cases (see its own note in Ast.hs) are handled structurally, before
+-- ever consulting ltRel -- an LMeet atom is never inserted into ltRel
+-- itself, so `reachable` doesn't need to know about it at all:
+--   LMeet a1 a2 ≤ b   iff a1 ≤ b  ∨  a2 ≤ b   (meet ≤ b if *either* side already is,
+--                                               since meet ≤ a1 and meet ≤ a2 always
+--                                               hold definitionally, so transitivity
+--                                               through whichever side reaches b is
+--                                               a sound, if not exhaustive, witness)
+--   a ≤ LMeet b1 b2   iff a ≤ b1  ∧  a ≤ b2   (a is below the meet iff below both --
+--                                               the defining universal property of
+--                                               a greatest lower bound)
 leq :: LifetimeAtom -> LifetimeAtom -> TC Bool
 leq a b
-  | a == b         = return True
-  | a == LBottom   = return True    -- ⊥ ≤ everything
-  | b == LTop      = return True    -- everything ≤ ⊤
-  | otherwise      = do
+  | a == b               = return True
+  | a == LBottom         = return True    -- ⊥ ≤ everything
+  | b == LTop            = return True    -- everything ≤ ⊤
+  | LMeet a1 a2 <- a     = (||) <$> leq a1 b <*> leq a2 b
+  | LMeet b1 b2 <- b     = (&&) <$> leq a b1 <*> leq a b2
+  | otherwise            = do
       lp <- getLfts
       return (reachable (ltRel lp) a b)
+
+-- | Meet (greatest lower bound) of two lifetime atoms -- ⊤ is the identity
+-- (meeting with ⊤ gives back the other atom untouched, since ⊤ imposes no
+-- restriction at all -- "for static and lft, we can just use the lft as
+-- static is infinite"), ⊥ is absorbing (meeting with ⊥ is always ⊥, since ⊥
+-- is already the global minimum of the preorder -- nothing can be *more*
+-- restrictive than the empty lifetime). Two genuinely different lifetime
+-- variables produce a structural LMeet term rather than a freshly minted
+-- variable -- see LMeet's own note in Ast.hs for why that needs no new
+-- newlft/endlft bookkeeping at all. Idempotent (a `meetLft` a = a) so
+-- repeated/nested merges (e.g. a chain of nested qifs) don't grow an
+-- ever-deeper LMeet tree when the same lifetime keeps recurring.
+meetLft :: LifetimeAtom -> LifetimeAtom -> LifetimeAtom
+meetLft a b
+  | a == b                        = a
+  | a == LTop                     = b
+  | b == LTop                     = a
+  | a == LBottom || b == LBottom  = LBottom
+  | otherwise                     = LMeet a b
 
 reachable :: Set.Set (LifetimeAtom, LifetimeAtom) -> LifetimeAtom -> LifetimeAtom -> Bool
 reachable rel start target = go Set.empty start
@@ -866,9 +904,45 @@ checkExpr (EIf x bt bf) = do
 
 
 
--- expr_quantum_if: qif x B|0⟩ B|1⟩
+-- expr_quantum_if (Fig. 15): qif x B|1⟩ else B|0⟩
 -- x : &^α qbit stays in Δ (not consumed); branches typed under Γ (without x)
--- Both branches must be PQ and return a PQ type T; result type is #^α T
+-- Both branches must be PQ and return the literal same T, per the rule's
+-- own premise "(Γ,A) ⊢ B_i : T" for both i -- exactly like expr_classical_if
+-- right next to it in Fig. 15. Result type is #^α T.
+--
+-- This used to require t1/t2 literally identical, full stop -- correct per
+-- the rule above, but stricter than necessary: it rejected any qif whose
+-- two branches were "morally the same value" but happened to carry
+-- different lifetime tags (typically because one branch nests a further
+-- qif, whose own conclusion is unconditionally retagged #^beta by this same
+-- rule, while its sibling is a bare [0]()/[1]() sitting at #top, or an
+-- untouched parameter at some other lifetime), forcing the programmer to
+-- insert an explicit `as` coercion by hand every time. Confirmed with Kengo
+-- this is exactly the kind of gap Fig. 15's literal rule leaves for a
+-- reason: the proof is easier against the strict version, but the intended
+-- implementation-level relaxation is the same one Rust itself uses across
+-- if/else branches -- automatically unify to the *shortest common*
+-- lifetime (a greatest-lower-bound/meet), not require the programmer to
+-- name it. See meetLft/unifyBranchTypes and LMeet's own note in Ast.hs for
+-- how that's implemented: never a freshly `newlft`'d variable (which would
+-- need its own cascading endlft bookkeeping to track when it stops being
+-- valid), but a purely structural term whose own activity is *defined* as
+-- "both original lifetimes still active" -- ends together with whichever
+-- of the two ends first, for free, exactly as intended.
+--
+-- The critical difference from the *old*, pre-Fig.-15-audit version of this
+-- rule (see grover.txt points 7-8) is where the merged lifetime ends up:
+-- that old version discarded whichever branch lifetime "won" a subtyping
+-- comparison and *replaced* it outright with a fresh, unrelated α, with no
+-- check that α was even reachable from it -- unsound (confirmed by
+-- build+simulate: examples/example_diagonal_skip_counterexample_error.qurts-core).
+-- meetLft never discards information: meeting with #top (the identity) can
+-- recover the old "just use α" behaviour when a branch's own tag was #top,
+-- but meeting with #bot (absorbing) or another genuine lifetime always
+-- narrows *into* the more restrictive one instead of silently overwriting
+-- it -- so a branch built from a non-diagonal bare-EU gate (#bot, a
+-- one-way door) can never again be laundered into something droppable just
+-- by passing it through a qif.
 checkExpr (EQIf x bt bf) = do
   ty <- lookupActiveVar x
   case ty of
@@ -894,17 +968,42 @@ checkExpr (EQIf x bt bf) = do
           t2 <- checkBlock bf
           -- restore x: &^α qbit back into context (stays in Δ after expression)
           insertVar x ty
-          compatible <- isSubtype t1 t2 `orM` isSubtype t2 t1
-          unless compatible $ throwError (TypeMismatch t1 t2)
-          unless (isPurelyQuantumType t1) $
-            throwError (NotPurelyQuantum ("qif then-branch return type is not PQ: " ++ show t1))
-          unless (isPurelyQuantumType t2) $
-            throwError (NotPurelyQuantum ("qif else-branch return type is not PQ: " ++ show t2))
-          isT1Sub <- isSubtype t1 t2
-          let t = if isT1Sub then t2 else t1
-          return (TyBang α (stripBang t))
+          t <- case unifyBranchTypes t1 t2 of
+            Just unified -> return unified
+            Nothing      -> throwError (TypeMismatch t1 t2)
+          unless (isPurelyQuantumType t) $
+            throwError (NotPurelyQuantum ("qif branch return type is not PQ: " ++ show t))
+          return (retagQifResult α t)
         _ -> throwError (NotAReference ty)
     _ -> throwError (NotAReference ty)
+
+-- | Unify two branch types that may differ only in their lifetime
+-- annotations, meeting the lifetime at each corresponding #^𝔞-position
+-- (see checkExpr's EQIf case for why, and meetLft for the meet itself).
+-- Nothing if the two types differ in anything other than a lifetime
+-- annotation under a # -- a genuinely different type shape (e.g. bool vs
+-- qbit, or a & at one position vs a # at the same position in the other)
+-- is still a hard TypeMismatch, same as before; this only ever widens
+-- what's accepted at a #^𝔞 position specifically.
+unifyBranchTypes :: Type -> Type -> Maybe Type
+unifyBranchTypes t1 t2 | t1 == t2 = Just t1
+unifyBranchTypes (TyBang a1 t1) (TyBang a2 t2) =
+  TyBang (meetLft a1 a2) <$> unifyBranchTypes t1 t2
+unifyBranchTypes (TyPair a1 b1) (TyPair a2 b2) =
+  TyPair <$> unifyBranchTypes a1 a2 <*> unifyBranchTypes b1 b2
+unifyBranchTypes _ _ = Nothing
+
+-- | Combine a qif's own control lifetime α with its (already-unified)
+-- branch return type's own outer lifetime tag, by meeting them -- not by
+-- discarding the branch's own tag and substituting α outright, which was
+-- the unsound behaviour this replaces (see checkExpr's EQIf case). When the
+-- branch type isn't itself #-wrapped (shouldn't arise for a PQ-valid qbit
+-- branch in practice, since every quantum value here is always #-tagged,
+-- but kept total rather than partial), falls back to wrapping with α alone
+-- -- the only sound choice when there's no existing tag to meet against.
+retagQifResult :: LifetimeAtom -> Type -> Type
+retagQifResult alpha (TyBang l inner) = TyBang (meetLft alpha l) inner
+retagQifResult alpha t                = TyBang alpha t
 
 
 --stripBang helper function to remove the outermost TyBang from a type

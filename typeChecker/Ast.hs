@@ -19,10 +19,29 @@ newtype Lifetime = Lifetime Text       -- lifetime variable α, β, ...
 
 
 -- Lifetime atom: 𝔞 ::= α | ⊥ | ⊤  (Figure 4)
+--
+-- LMeet is not part of the paper's own grammar -- it's a purely internal,
+-- derived lifetime term TypeChecker.hs's checkExpr(EQIf) synthesizes when a
+-- qif's two branches produce the same type up to their outermost lifetime
+-- tag (e.g. #alpha qbit vs #top qbit), instead of requiring the programmer
+-- to reconcile them with an explicit `as` coercion every time (mirroring
+-- how Rust automatically infers the common/shortest lifetime across an
+-- if/else's two branches rather than demanding identical explicit
+-- annotations). `LMeet a b` denotes the greatest lower bound of a and b in
+-- the ambient preorder -- deliberately never registered as a tracked
+-- variable in LifetimePreorder's own ltVars (unlike a real newlft'd
+-- lifetime): TypeChecker.hs's isActive/leq handle it structurally,
+-- recursing into both sides on demand, so its own "activity" is *defined*
+-- as "both a and b still active" with no separate bookkeeping to keep in
+-- sync -- it automatically stops being active the instant either parent
+-- does (endlft'd or otherwise), which is exactly what "ends together with
+-- whichever of the two ends first" means, for free, rather than needing a
+-- freshly-minted variable with its own cascading endlft logic.
 data LifetimeAtom
   = LVar Lifetime
   | LBottom                            -- ⊥ ("bot"), the empty lifetime = linear
   | LTop                               -- ⊤ ("top"), the static lifetime = always affine
+  | LMeet LifetimeAtom LifetimeAtom     -- derived: greatest lower bound of two atoms
   deriving (Eq, Ord, Show)
 
 

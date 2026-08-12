@@ -1,62 +1,53 @@
--- This module used to also classify some gates as "diagonal" and let
--- Uncompute.hs skip reversing them (isDiagonalUnitary/isDiagonalClassical,
--- backing a shortcut in reverseOrigin's FromGate/FromClassicalGate cases).
--- That shortcut is gone -- it was unsound, not just an optimisation.
+-- This module classifies some gates as "diagonal" (isDiagonalUnitary /
+-- isDiagonalClassical) so Uncompute.hs's reverseOrigin can skip reversing
+-- them entirely when unwinding a value's construction history, on the
+-- reasoning that a diagonal gate never moves a computational-basis ket to a
+-- different one, only multiplies it by a phase -- so undoing it is never
+-- *necessary* to reach |0>.
 --
--- The argument for it was: "a diagonal gate never moves a qubit to a
--- different computational-basis branch, only multiplies that branch's own
--- amplitude by a phase, so reversing it is never *necessary* to reach |0>".
--- True in isolation, but it silently assumed the qubit was already confined
--- to a single basis ket at the point the diagonal gate was applied --
--- nothing in Qurts's type system guarantees that. A qif's own typing rule
--- (typ_qif, TypeChecker.hs) retypes a branch's return value to #alpha T
--- regardless of what bang-tag that branch actually produced, including
--- #bot from an EU-dispatched *non*-diagonal gate (e.g. H) earlier in that
--- same branch's own local history -- so a later diagonal gate in the same
--- chain can end up applied to a value that is genuinely, locally superposed,
--- not just phase-tagged per branch. Skipping its reversal there silently
--- entangles the dropped value with whatever it was branching on, instead of
--- returning it to |0> -- confirmed by direct construction (H then Z, both
--- bare EU, inside one branch of a qif whose other branch is untouched: the
--- compiled circuit's two branches disagree on the qubit's final value under
--- the old skip-based reversal).
+-- History: this shortcut existed once, was found unsound as a blanket rule
+-- and removed (2026-08-08) -- confirmed by direct construction: H then Z,
+-- both bare EU, inside one branch of a qif whose other branch is untouched,
+-- then dropped. typ_qif (TypeChecker.hs) retags that branch's return value
+-- #alpha (droppable) regardless of what bang-tag it actually carries,
+-- including #bot from the EU-dispatched H -- so the qubit reaching the drop
+-- was never actually confined to a single basis ket the way the shortcut's
+-- own argument assumes, and skipping Z's reversal there left it entangled
+-- with the qif's control instead of reaching |0>.
 --
--- Full, faithful reversal -- apply each gate's own exact inverse, in exact
--- reverse order, every time, never skipping any step regardless of what the
--- gate is -- is what Qurts's uncomputation-semantics theorem (Thm 5.4, the
--- proof that uncomputation semantics and simulation semantics agree)
--- actually establishes as correct. There is no theorem, in Qurts or in
--- Unqomp (Paradis et al. 2021, PLDI -- the paper this project's own
--- uncomputation approach is modelled on), licensing a shortcut keyed on a
--- gate's name being diagonal. Unqomp's own qfree criterion is in fact
--- stricter than "diagonal": qfree requires |i>|k> -> |i>|f(k)> with
--- coefficient exactly 1, which a phase gate like Z fails outright (Z|1> =
--- -|1>) -- Unqomp's own algorithm would refuse to auto-reverse Z at all,
--- the same way it refuses H, and its own paper states plainly that Grover's
--- phase kickback is "built by hand, entirely outside" their automatic
--- machinery. example_grover.qurts-core and example_grover2.qurts-core don't
--- rely on this any more -- they compute their oracle's phase without ever
--- dropping a value that a diagonal gate was applied to (see those files) --
--- but example_grover_original.qurts-core deliberately still does, kept
--- around specifically to demonstrate that this is legal: it type-checks,
--- uncomputes, and runs, it just gives a uniform (not peaked) distribution,
--- because full reversal faithfully -- and correctly -- undoes its own phase
--- kickback along with everything else. That's the type checker doing its
--- actual job (guaranteeing dropping a value is sound) and nothing more; it
--- is not this system's job to reject a well-typed program for computing
--- something pointless. A real fix -- deciding, case by case, whether a
--- given diagonal gate in a given drop's history is safe to leave un-reversed
--- without destroying an intended effect elsewhere -- needs information this
--- module doesn't have (see isKnownClassicalInjection's own note) and
--- belongs at a different layer entirely: wherever a `drop`'s reversal is
--- actually scheduled/inserted, which is the same "naive strategy only, not
--- the paper's full pebble-game flexibility" boundary uncompute/Uncompute.hs
--- already documents as future work, not something to improvise here as a
--- gate-table lookup.
-module GateInverse (unitaryInverse, classicalInverse, isKnownClassicalInjection, isTwoQubitClassical) where
+-- Reinstated (2026-08-12) per direct confirmation from Kengo, the qurts-core
+-- paper's author: any value that type-checks its way to a `drop` is qfree by
+-- the type system's own guarantee, and a diagonal gate applied to a value
+-- that's genuinely confined to a basis ket is exactly the case where
+-- skipping its reversal is sound -- unconditionally, no gate-name exception
+-- needed beyond "is this gate diagonal at all". This is a stronger claim
+-- than Unqomp's own qfree criterion licenses on its own (Paradis et al.
+-- 2021, PLDI: qfree requires coefficient exactly 1, which Z itself fails,
+-- and Unqomp's own paper treats phase kickback as "built by hand, entirely
+-- outside" its automatic machinery) -- the extra step is Kengo's claim that
+-- Qurts's own type system, correctly enforced, already rules out the
+-- "genuinely superposed at the point of the diagonal gate" case that would
+-- make skipping unsound.
+--
+-- "Correctly enforced" is the load-bearing phrase: the H;Z-in-qif-branch
+-- counterexample above still type-checks today (kept as
+-- examples/example_diagonal_skip_counterexample.qurts-core) and reinstating
+-- this skip reproducibly mis-uncomputes it -- verified by an actual
+-- build+simulate run, not just re-argued: deterministic (1000/1000) under
+-- full reversal, ~50/50 (entangled) under this skip. See grover.txt point 7
+-- for the full reproduction. The gap is understood to be in TypeChecker.hs's
+-- own qif rule (checkExpr (EQIf ...), `return (TyBang alpha (stripBang t))`)
+-- silently retagging a branch built from a non-diagonal bare-EU gate (H) as
+-- if its result were droppable/basis-confined -- fixing that is the next
+-- step, tracked separately from this module. Until it lands, this skip is
+-- only actually sound for values whose *entire* tracked history really is
+-- qfree, same as before reinstatement, just no longer enforced by the type
+-- checker for every program this skip now applies to.
+module GateInverse (unitaryInverse, classicalInverse, isKnownClassicalInjection, isTwoQubitClassical, isDiagonalUnitary, isDiagonalClassical) where
 
 import Ast (Unitary (..), Classical (..))
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text, pack)
 
 -- Table of standard single-qubit unitaries named via EU (bare U(x) syntax,
@@ -199,3 +190,22 @@ isKnownClassicalInjection (Classical name) = name `Map.member` classicalInverseT
 -- pipeline that's supposed to catch exactly this kind of mistake first.
 isTwoQubitClassical :: Classical -> Bool
 isTwoQubitClassical (Classical name) = fmap snd (Map.lookup name classicalInverseTable) == Just 2
+
+-- | The gate names, EU and EC alike, that are diagonal in the computational
+-- basis -- phase-only (I/Z/S/Sdg/T/Tdg), as opposed to X/Y/H (which mix
+-- basis states) or cnot/swap (which permute them). Same set on both sides:
+-- a name means the same physical gate whichever syntax invoked it. See the
+-- module-level note for what this backs and what it currently depends on.
+diagonalGateNames :: Set.Set Text
+diagonalGateNames = Set.fromList $ map pack ["I", "Z", "S", "Sdg", "T", "Tdg"]
+
+-- | Whether a unitary gate named via EU (bare U(x)) is diagonal -- see
+-- diagonalGateNames and the module-level note. Used by Uncompute.hs's
+-- reverseOrigin to skip reversing this gate entirely.
+isDiagonalUnitary :: Unitary -> Bool
+isDiagonalUnitary (Unitary name) = name `Set.member` diagonalGateNames
+
+-- | Same, for a classical injection named via EC ([c](x)). Same name set as
+-- isDiagonalUnitary -- see diagonalGateNames.
+isDiagonalClassical :: Classical -> Bool
+isDiagonalClassical (Classical name) = name `Set.member` diagonalGateNames
