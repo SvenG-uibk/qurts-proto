@@ -2,7 +2,7 @@ Lexer and parser: see bnfc/readme.txt.
 
 Build:
 
-ghc -ibnfc -ibnfc/bnfc-output -iuncompute -icircuit -itypeChecker Main.hs typeChecker/AbsQurtsToAst.hs typeChecker/Ast.hs typeChecker/TypeChecker.hs uncompute/Uncompute.hs uncompute/GateInverse.hs uncompute/PrettyAst.hs circuit/Circuit.hs -o qurts
+ghc -ibnfc -ibnfc/bnfc-output -iuncompute -icircuit -itypeChecker -ipebbling Main.hs typeChecker/AbsQurtsToAst.hs typeChecker/Ast.hs typeChecker/TypeChecker.hs uncompute/Uncompute.hs uncompute/GateInverse.hs uncompute/PrettyAst.hs circuit/Circuit.hs pebbling/CircuitGraph.hs pebbling/RenderGraph.hs -o qurts
 
 AbsQurtsToAst.hs converts bnfc's generated parse tree into Ast.hs's own syntax, which follows the paper.
 
@@ -18,6 +18,10 @@ no flags     full pipeline (parse, check, uncompute, circuit); prints the circui
 -parse       parse only
 -check       parse and type check
 -uncompute   parse, check, uncompute; writes the result to examples-uncomputed/
+-graph       parse, check, build the pebbling circuit graph (Definition 5.1); prints
+             a text listing (see pebbling/README.md -- graph construction only, no
+             pebble-game solver)
+-graph-dot   same, writing Graphviz DOT to examples-graphs/ instead of stdout
 -test        full pipeline over every *.qurts-core file in a directory, as a table
 
 Files with _error in their name are expected to fail type-checking; everything else must succeed
@@ -32,6 +36,12 @@ splitting a pebble on the qif control into |0>/|1>-guarded fragments and merging
 drop can be reversed even when it's nested inside a qif branch, depends on a reference created
 locally inside that branch/callee, or needs one half of a jointly-computed pair while the other
 half is still live. This is what's blocking 5 of 30 examples (see uncompute/README.md).
+
+pebbling/ builds the graph half of that (Definition 5.1's circuit graph -- V_init/V_gate/
+V_merge/V_linear), which the pebble game itself would be played over; see pebbling/README.md for
+exactly what it does and doesn't give you. The pebble game (Definition 5.2, Appendix D) --
+actually deciding a pebbling/reuse strategy over that graph, which is what would let the 5
+examples above through -- is not implemented yet.
 
 Circuit backend (circuit/) -- smaller gaps on top of an otherwise complete compiler:
 - circuit correctness is currently checked by hand-picked spot simulations (Bell state, Toffoli

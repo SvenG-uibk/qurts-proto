@@ -19,6 +19,8 @@ import TypeChecker        ( checkProgram )
 import Uncompute          ( uncomputeProgram )
 import PrettyAst          ( prettyProgram )
 import Circuit             ( compileProgram, renderCircuit, Circuit )
+import CircuitGraph        ( buildProgramGraph )
+import RenderGraph         ( renderText, renderDot )
 
 
 main :: IO ()
@@ -28,6 +30,8 @@ main = do
     ["-parse",     file] -> parseFile file
     ["-check",     file] -> checkFile file
     ["-uncompute", file] -> uncomputeFile file
+    ["-graph",     file] -> graphFile False file
+    ["-graph-dot", file] -> graphFile True  file
     ["-test",      dir]  -> testDir dir
     ["-v",         file] -> runPipeline True  False file
     ["-simulate",  file] -> runPipeline False True  file
@@ -50,6 +54,11 @@ usage = do
   putStrLn "  qurts -uncompute <file.qurts-core>  -- parse, check, uncompute; writes the"
   putStrLn "                                         re-translated qurts-core source to"
   putStrLn "                                         examples-uncomputed/"
+  putStrLn "  qurts -graph <file.qurts-core>      -- parse, check, build the pebbling"
+  putStrLn "                                         circuit graph (Definition 5.1);"
+  putStrLn "                                         prints a text listing of it"
+  putStrLn "  qurts -graph-dot <file.qurts-core>  -- same, writing Graphviz DOT to"
+  putStrLn "                                         examples-graphs/ instead"
   putStrLn "  qurts -test <directory>             -- parse+check every *.qurts-core in"
   putStrLn "                                         directory; files with _error in the"
   putStrLn "                                         name must fail, all others must succeed"
@@ -129,6 +138,32 @@ uncomputeFile file = do
                   let outPath = "examples-uncomputed" </> takeFileName file
                   writeFile outPath printed
                   putStrLn ("wrote " ++ outPath)
+
+-- | Parse, check, and build the pebbling circuit graph (Definition 5.1 --
+-- see pebbling/CircuitGraph.hs and pebbling/README.md for exactly what this
+-- is and isn't: the graph only, no pebble-game solver). `asDot` selects
+-- Graphviz DOT, written to examples-graphs/ (mirroring -uncompute's own
+-- examples-uncomputed/ convention), instead of the default plain-text
+-- listing to stdout.
+graphFile :: Bool -> FilePath -> IO ()
+graphFile asDot file = do
+  contents <- readFileOrDie file
+  case pProgram (myLexer contents) of
+    Left err -> die ("parse error: " ++ err)
+    Right bnfcTree -> do
+      let ast = convertProgram bnfcTree
+      case checkProgram ast of
+        Left err -> die ("does not type check: " ++ show err)
+        Right () -> case buildProgramGraph ast of
+          Left err -> die ("circuit graph construction failed: " ++ err)
+          Right (g, _finalRet) ->
+            if asDot
+              then do
+                createDirectoryIfMissing True "examples-graphs"
+                let outPath = "examples-graphs" </> takeFileName file ++ ".dot"
+                writeFile outPath (renderDot g)
+                putStrLn ("wrote " ++ outPath)
+              else putStrLn (renderText g)
 
 -- | Full pipeline: parse, check, uncompute, compile to a circuit, then hand
 -- the circuit off to circuit/build_circuit.py to render as an actual Qiskit

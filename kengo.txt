@@ -155,7 +155,22 @@ state)? Or is "when to uncompute, and whether a given step even needs
 reversing" fundamentally not a *type* question at all, but a *scheduling*
 question that belongs entirely in the pebble-game semantics (Section 5),
 where a strategy is free to choose not to place/clear a pebble in a way
-that would destroy a needed correlation? 
+that would destroy a needed correlation?
+
+RESOLVED (2026-08-12) -- asked Kengo directly: we can always skip a
+diagonal gate's reversal unconditionally, no basis-tracking needed, no new
+type-level machinery, not a scheduling question either. Reinstated
+GateInverse.hs's isDiagonalUnitary/isDiagonalClassical (plain gate-name
+check -- I/Z/S/Sdg/T/Tdg -- not the basis-confinement sketch above) and
+the skip in Uncompute.hs's reverseOrigin. Caught a real snag first, worth
+recording: re-ran the H;Z-inside-one-qif-branch counterexample from this
+question's own writeup live (build+simulate, not hand-traced) and it still
+broke under the literal "always skip" reading -- 510/490 instead of
+deterministic, same invalid discard as before. Turned out the
+counterexample's actual cause was Question 3's bug below (typ_qif silently
+discarding a branch's own lifetime tag when merging), not this one -- once
+that was fixed, the skip is exactly as sound as Kengo said, unconditionally.
+Full story: grover.txt points 7-9.
 
 --- Question 3: does typ_qif really require the *same* type from both
     branches?
@@ -193,12 +208,43 @@ anywhere else in the calculus, and Fig 15's own rule is under-specified? Or
 is there a different, paper-intended way to write `oracle` that never
 produces mismatched branch types in the first place, making our relaxation
 a convenience that happens to also accept programs the core calculus never
-meant to? 
+meant to?
 
 --lifetime intersection
 --for question 3,4, check out rust's way of doing it, we should allow different lifetimes
-and just create a new lifetime which is the intersection of the two 
+and just create a new lifetime which is the intersection of the two
 (or in case of static, the other one)
+
+RESOLVED (2026-08-12) -- asked Kengo directly, answer is neither of the two
+options above: Fig 15's literal same-T rule is deliberately strict only to
+keep the paper's own proof simple; the *implementation* is expected to be
+more permissive, exactly the "lifetime intersection" idea noted by hand
+above -- infer the intersection (greatest lower bound) of the two branches'
+lifetimes automatically, the same way Rust infers a common lifetime across
+if/else branches instead of demanding identical annotations, rather than
+either rejecting outright or silently picking-the-wider-via-subtyping the
+way this implementation used to.
+
+Implemented as `LMeet` (TypeChecker.hs/Ast.hs): a purely structural,
+derived lifetime term, never registered as a real newlft'd variable --
+its own "active" check is just "both original lifetimes still active",
+recomputed fresh every time, so it automatically stops being valid the
+instant either one ends, with no bookkeeping to keep in sync. #top is the
+identity (meeting with it just gives back the other lifetime, matching
+"or in case of static, the other one" above); #bot is absorbing (meeting
+with it is always #bot, since bot is already the global minimum).
+
+This also exposed a real, previously-unnoticed soundness bug in the *old*
+subtyping-relaxation described above: it didn't just "pick the wider type"
+-- it discarded the losing branch's own lifetime tag entirely and replaced
+it with the qif's own control lifetime, unconditionally, with no check
+that was even reachable. That's what let a #bot-tagged branch (forfeited
+droppability, from a bare general-unitary gate) get silently laundered
+into something droppable just by passing it through a qif merged against
+a #top branch -- confirmed by an actual counterexample building on the one
+in Question 2 above (build+simulate, not just argued). `LMeet` fixes this
+too, since meeting with #bot is absorbing, not discarded. Full story:
+grover.txt points 7-9.
 
 --- Question 4: does stmt_borrow's own "α ∉ A_ex,Π,f" premise actually hold
     up against a function that needs to hand a *locally built* value into a
